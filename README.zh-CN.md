@@ -18,7 +18,20 @@ mcp-warden scan               # 静态审计（不执行任何东西）
 mcp-warden scan --probe       # 真正启动/连接服务器，检查它暴露的工具
 mcp-warden pin --probe        # 记录可信基线（~/.mcp-warden/lock.json）
 mcp-warden diff               # 和基线比较，有变化就以退出码 1 报警
+mcp-warden watch              # 每小时自动检查一次，有新变化就通知
 ```
+
+## 持续监控（watch）
+
+```sh
+mcp-warden pin --probe                              # 先确认当前状态可信
+mcp-warden watch --interval 30m                     # 桌面通知
+mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"    # 推送到飞书 / 钉钉 / 企业微信 / Slack / Discord
+```
+
+- 根据 webhook 地址自动识别格式，也可以用 `--webhook-format` 手动指定。webhook 地址里带有密钥，建议放在环境变量 `MCP_WARDEN_WEBHOOK` 里。
+- 同一个变化只提醒一次；发送失败会在下一轮重试。审核完变化后重新执行 `pin`，就算确认接受了。
+- 想交给 cron / launchd / systemd 定时调度，就用 `--once`：只检查一轮就退出，仍有未处理的变化时退出码为 1。例如 `17 * * * * mcp-warden watch --once`。
 
 > `--probe` 会像你的 MCP 客户端一样启动每个已启用的服务器（包括 `npx`/`uvx` 下载）。`scan`、`list` 和不带 `--probe` 的 `pin` 都不会执行任何东西。
 

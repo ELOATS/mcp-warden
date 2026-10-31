@@ -9,15 +9,18 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ELOATS/mcp-warden/internal/audit"
 	"github.com/ELOATS/mcp-warden/internal/config"
 	"github.com/ELOATS/mcp-warden/internal/lockfile"
+	"github.com/ELOATS/mcp-warden/internal/notify"
 	"github.com/ELOATS/mcp-warden/internal/probe"
 	"github.com/ELOATS/mcp-warden/internal/report"
 )
@@ -46,6 +49,7 @@ Usage:
   mcp-warden scan   [flags]   audit configs; add --probe to inspect live tool definitions
   mcp-warden pin    [flags]   record a trusted baseline (lockfile)
   mcp-warden diff   [flags]   report anything that changed since the baseline
+  mcp-warden watch  [flags]   re-run diff periodically and alert on new changes
   mcp-warden version
 
 Common flags:
@@ -57,7 +61,16 @@ Common flags:
   --json              machine-readable output
   --fail-on SEV       exit 1 if a finding is at or above SEV: info|low|medium|high|critical|none
   --show SEV          lowest severity printed in text output (default low)
-  --lock FILE         lockfile path for pin/diff
+  --lock FILE         lockfile path for pin/diff/watch
+
+Watch flags:
+  --interval DUR      time between checks (default 1h, minimum 1m)
+  --once              run a single check and exit (for cron, launchd, systemd)
+  --notify MODE       desktop (default) or none
+  --webhook URL       also post alerts here (or set MCP_WARDEN_WEBHOOK)
+  --webhook-format F  auto|slack|discord|feishu|dingtalk|wecom|json (default auto)
+  --state FILE        where already-alerted changes are remembered
+  --fail-on SEV       minimum severity that triggers an alert (default medium)
 
 Exit codes: 0 ok, 1 findings at/above --fail-on, 2 usage or runtime error.
 Probing runs each server's command exactly as your MCP client would; only probe configs you would launch anyway.
@@ -78,6 +91,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdPin(args[1:], stdout, stderr)
 	case "diff":
 		return cmdDiff(args[1:], stdout, stderr)
+	case "watch":
+		return cmdWatch(args[1:], stdout, stderr)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "mcp-warden "+version)
 		return 0
@@ -386,6 +401,37 @@ func cmdPin(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// errNoBaseline is returned by computeDiff when no lockfile exists yet.
+var errNoBaseline = errors.New("no baseline")
+
+// computeDiff loads the baseline and compares the current state against it.
+// Tools are probed automatically when the baseline has tool fingerprints,
+// unless --probe was given explicitly.
+func (o *opts) computeDiff(probeLog io.Writer) (string, lockfile.File, []audit.Finding, error) {
+	env, err := config.DefaultEnv(o.project)
+	if err != nil {
+		return "", lockfile.File{}, nil, err
+	}
+	path := o.lockPath(env)
+	base, err := lockfile.Load(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return path, base, nil, fmt.Errorf("%w at %s; run `mcp-warden pin --probe` first", errNoBaseline, path)
+		}
+		return path, base, nil, err
+	}
+	doProbe := o.probe
+	if !o.probeSet {
+		doProbe = base.HasProbed()
+	}
+	a, err := o.analyze(probeLog, doProbe)
+	if err != nil {
+		return path, base, nil, err
+	}
+	cur := lockfile.Build("mcp-warden "+version, a.snapshots())
+	return path, base, lockfile.Diff(base, cur), nil
+}
+
 func cmdDiff(args []string, stdout, stderr io.Writer) int {
 	flags, o := newFlags("diff", stderr, "medium")
 	if err := parse(flags, o, args); err != nil {
@@ -396,32 +442,11 @@ func cmdDiff(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	env, err := config.DefaultEnv(o.project)
+	path, base, findings, err := o.computeDiff(stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	path := o.lockPath(env)
-	base, err := lockfile.Load(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(stderr, "no baseline at %s; run `mcp-warden pin --probe` first\n", path)
-		} else {
-			fmt.Fprintln(stderr, "error:", err)
-		}
-		return 2
-	}
-	doProbe := o.probe
-	if !o.probeSet {
-		doProbe = base.HasProbed() // compare tools automatically if the baseline has them
-	}
-	a, err := o.analyze(stderr, doProbe)
-	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
-	}
-	cur := lockfile.Build("mcp-warden "+version, a.snapshots())
-	findings := lockfile.Diff(base, cur)
 	if o.json {
 		_ = report.WriteJSON(stdout, map[string]any{
 			"lockfile": path, "pinnedAt": base.GeneratedAt, "findings": nonNil(findings), "summary": audit.Summary(findings)})
@@ -432,6 +457,145 @@ func cmdDiff(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func cmdWatch(args []string, stdout, stderr io.Writer) int {
+	flags, o := newFlags("watch", stderr, "medium")
+	interval := flags.Duration("interval", time.Hour, "")
+	once := flags.Bool("once", false, "")
+	desktop := flags.String("notify", "desktop", "")
+	webhook := flags.String("webhook", os.Getenv("MCP_WARDEN_WEBHOOK"), "")
+	webhookFormat := flags.String("webhook-format", notify.FormatAuto, "")
+	statePath := flags.String("state", "", "")
+	if err := parse(flags, o, args); err != nil {
+		return 2
+	}
+	threshold, failing, err := failThreshold(o.failOn)
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	if !failing {
+		threshold = audit.Info // --fail-on none: alert on everything
+	}
+	if *interval < time.Minute && !*once {
+		fmt.Fprintln(stderr, "error: --interval must be at least 1m")
+		return 2
+	}
+	var notifiers []notify.Notifier
+	switch *desktop {
+	case "desktop":
+		notifiers = append(notifiers, notify.Desktop{})
+	case "none":
+	default:
+		fmt.Fprintf(stderr, "error: --notify must be desktop or none, got %q\n", *desktop)
+		return 2
+	}
+	if *webhook != "" {
+		if !contains(notify.Formats, *webhookFormat) {
+			fmt.Fprintf(stderr, "error: --webhook-format must be one of %s\n", strings.Join(notify.Formats, ", "))
+			return 2
+		}
+		notifiers = append(notifiers, notify.Webhook{URL: *webhook, Format: *webhookFormat})
+	}
+	if *statePath == "" {
+		env, err := config.DefaultEnv(o.project)
+		if err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 2
+		}
+		*statePath = filepath.Join(filepath.Dir(o.lockPath(env)), "watch-state.json")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// tick runs one check. It returns the number of findings at/above the
+	// threshold, and a fatal error only when watching cannot continue.
+	tick := func() (int, error) {
+		_, _, findings, err := o.computeDiff(io.Discard)
+		if err != nil {
+			if errors.Is(err, errNoBaseline) {
+				return 0, err
+			}
+			fmt.Fprintf(stderr, "%s check failed: %v\n", stamp(), err)
+			return 0, nil
+		}
+		var relevant []audit.Finding
+		for _, f := range findings {
+			if f.Severity >= threshold {
+				relevant = append(relevant, f)
+			}
+		}
+		state, err := notify.LoadState(*statePath)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s cannot read state: %v\n", stamp(), err)
+		}
+		fresh := state.New(relevant)
+		if len(fresh) == 0 {
+			fmt.Fprintf(stdout, "%s ok: %d open change(s), nothing new\n", stamp(), len(relevant))
+			state.Sync(relevant, nil, time.Now())
+			_ = state.Save(*statePath)
+			return len(relevant), nil
+		}
+		msg := notify.Compose(fresh)
+		fmt.Fprintf(stdout, "%s %s\n%s\n", stamp(), msg.Title, msg.Body)
+		delivered := len(notifiers) == 0
+		for _, n := range notifiers {
+			if err := n.Notify(ctx, msg); err != nil {
+				fmt.Fprintf(stderr, "%s %s notification failed: %v\n", stamp(), n.Name(), err)
+				continue
+			}
+			delivered = true
+		}
+		if delivered { // otherwise keep them "new" and retry next tick
+			state.Sync(relevant, fresh, time.Now())
+		} else {
+			state.Sync(relevant, nil, time.Now())
+		}
+		if err := state.Save(*statePath); err != nil {
+			fmt.Fprintf(stderr, "%s cannot save state: %v\n", stamp(), err)
+		}
+		return len(relevant), nil
+	}
+
+	open, err := tick()
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	if *once {
+		if failing && open > 0 {
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "%s watching every %s (Ctrl-C to stop)\n", stamp(), *interval)
+	t := time.NewTicker(*interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(stdout, "%s stopped\n", stamp())
+			return 0
+		case <-t.C:
+			if _, err := tick(); err != nil {
+				fmt.Fprintln(stderr, "error:", err)
+				return 2
+			}
+		}
+	}
+}
+
+func stamp() string { return time.Now().Format("2006-01-02 15:04:05") }
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func nonNil(f []audit.Finding) []audit.Finding {

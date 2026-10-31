@@ -39,6 +39,7 @@ mcp-warden scan                       # static audit of every config (runs nothi
 mcp-warden scan --probe               # also start/connect to servers and inspect their tools
 mcp-warden pin --probe                # record a trusted baseline (~/.mcp-warden/lock.json)
 mcp-warden diff                       # what changed since the baseline? (exit 1 on changes)
+mcp-warden watch                      # re-check every hour, notify on new changes
 ```
 
 Useful flags: `--project DIR`, `--project-only` (skip user configs),
@@ -48,6 +49,46 @@ Useful flags: `--project DIR`, `--project-only` (skip user configs),
 > `--probe` launches each enabled server's command exactly as your MCP client
 > would (including `npx`/`uvx` downloads). Static `scan`, `list` and a
 > config-only `pin` never execute anything.
+
+### Continuous monitoring (`watch`)
+
+`watch` re-runs `diff` against your baseline and alerts only on changes it has
+not reported before. A failed delivery is retried on the next check.
+
+```sh
+mcp-warden pin --probe                                # 1. accept the current state
+mcp-warden watch --interval 30m                       # 2. desktop notifications
+mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"      #    …and/or chat
+```
+
+Webhook format is detected from the URL: Slack, Discord, Feishu/Lark,
+DingTalk, WeCom, otherwise generic JSON (`--webhook-format` overrides it).
+Keep the URL in `MCP_WARDEN_WEBHOOK` rather than in shell history.
+Desktop notifications use `osascript` (macOS), `notify-send` (Linux) or
+PowerShell (Windows). After you review a change, run `pin` again to accept it.
+
+For a scheduler, use `--once`. It runs one check, alerts, and exits 1 if open
+changes remain:
+
+```sh
+# cron (Linux/macOS): hourly
+17 * * * * /usr/local/bin/mcp-warden watch --once >> ~/.mcp-warden/watch.log 2>&1
+
+# systemd user timer: ~/.config/systemd/user/mcp-warden.service
+#   [Service]
+#   Type=oneshot
+#   ExecStart=%h/go/bin/mcp-warden watch --once
+# ~/.config/systemd/user/mcp-warden.timer
+#   [Timer]
+#   OnCalendar=hourly
+#   Persistent=true
+#   [Install]
+#   WantedBy=timers.target
+systemctl --user enable --now mcp-warden.timer
+```
+
+On macOS, a launchd agent with `StartInterval` 3600 running
+`mcp-warden watch --once` does the same job.
 
 ### CI gate (GitHub Actions)
 
@@ -102,7 +143,6 @@ internal/testserver   scripted MCP server used by the tests
 
 ## Roadmap
 
-- `watch` mode / scheduled diff with desktop or Slack notification
 - prompts & resources inspection, OAuth-aware remote probing
 - signed allowlist policy for teams (`mcp-warden.policy.json`), SARIF output
 - live package metadata (publish age, maintainer changes, download counts)
