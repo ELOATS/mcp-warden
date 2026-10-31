@@ -30,3 +30,7 @@ mcp-warden diff               # 和基线比较，有变化就以退出码 1 报
 - **组合风险**：能执行命令的工具、同名工具互相遮蔽、"联网读取 + 本地数据 + 外传"的危险组合
 
 完整规则表见 [README.md](README.md)。锁文件不保存任何密钥（env 和 header 只存哈希，参数和 URL 已打码）。
+
+## 许可证
+
+Apache License 2.0，详见 [LICENSE](LICENSE)。

@@ -99,3 +99,7 @@ internal/testserver   scripted MCP server used by the tests
 - prompts & resources inspection, OAuth-aware remote probing
 - signed allowlist policy for teams (`mcp-warden.policy.json`), SARIF output
 - live package metadata (publish age, maintainer changes, download counts)
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
