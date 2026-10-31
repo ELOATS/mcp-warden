@@ -16,7 +16,7 @@ jobs:
           fetch-depth: 0 # changelog needs full history
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable # recent Go is required for loadable macOS binaries
       - run: go vet ./...
       - run: go test -race ./...
       - uses: goreleaser/goreleaser-action@v6

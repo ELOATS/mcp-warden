@@ -1,4 +1,4 @@
-name: mcp-warden
+name: ci
 
 on:
   push:
@@ -7,14 +7,22 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          # Latest Go on every platform we ship. Old toolchains produce macOS
+          # binaries without LC_UUID, which recent macOS refuses to load.
+          - { os: ubuntu-latest, go: stable }
+          - { os: macos-latest, go: stable }
+          # Minimum version declared in go.mod.
+          - { os: ubuntu-latest, go: "1.22" }
     runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: ${{ matrix.go }}
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race ./...
