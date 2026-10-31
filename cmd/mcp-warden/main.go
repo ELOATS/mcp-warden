@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +22,18 @@ import (
 	"github.com/ELOATS/mcp-warden/internal/report"
 )
 
-var version = "0.1.0"
+// version is set at release time with -ldflags "-X main.version=1.2.3".
+// For `go install ...@vX.Y.Z` builds it falls back to the module version.
+var version = "dev"
+
+func init() {
+	if version != "dev" {
+		return
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		version = strings.TrimPrefix(bi.Main.Version, "v")
+	}
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

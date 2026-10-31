@@ -8,6 +8,8 @@ MCP 服务器以你的权限运行，工具描述会被模型当作指令来读�
 
 ## 快速开始
 
+从 [Releases](https://github.com/ELOATS/mcp-warden/releases) 下载对应平台的预编译二进制（Linux / macOS / Windows，amd64 / arm64，附 `checksums.txt` 校验），或者用 Go 1.22+ 安装：
+
 ```sh
 go install github.com/ELOATS/mcp-warden/cmd/mcp-warden@latest
 

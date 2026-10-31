@@ -18,11 +18,18 @@ check, and gives teams a CI gate.
 
 ## Install
 
+Download a prebuilt binary for Linux, macOS or Windows (amd64/arm64) from
+[Releases](https://github.com/ELOATS/mcp-warden/releases) and verify it against
+`checksums.txt`, or build it with Go 1.22+:
+
 ```sh
 go install github.com/ELOATS/mcp-warden/cmd/mcp-warden@latest
 # or from a checkout
-cd mcp-warden && go build ./cmd/mcp-warden
+go build ./cmd/mcp-warden
 ```
+
+Maintainers: pushing a tag such as `v0.1.0` runs the tests and publishes a
+release via GoReleaser (`.goreleaser.yaml`, `.github/workflows/release.yml`).
 
 ## Usage
 
