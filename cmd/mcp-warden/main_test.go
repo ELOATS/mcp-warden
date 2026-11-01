@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ELOATS/mcp-warden/internal/testserver"
 )
@@ -344,5 +345,42 @@ func TestSARIF(t *testing.T) {
 	}
 	if code, out, _ := runCLI(t, "rules"); code != 0 || !strings.Contains(out, "TOOL-POISONING") {
 		t.Errorf("rules: %d", code)
+	}
+}
+
+func TestScanRegistry(t *testing.T) {
+	project, _ := setup(t)
+	now := time.Now().UTC()
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/@modelcontextprotocol%2Fserver-github":
+			// The fixture's gh server floats to latest, which was published an hour ago.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"dist-tags": map[string]string{"latest": "9.0.0"},
+				"time": map[string]string{"created": now.AddDate(-1, 0, 0).Format(time.RFC3339),
+					"9.0.0": now.Add(-time.Hour).Format(time.RFC3339)},
+				"versions":   map[string]any{"9.0.0": map[string]any{}},
+				"repository": "github:modelcontextprotocol/servers",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer reg.Close()
+	// The fixture's gh server is disabled; enable it for this test.
+	cfgPath := filepath.Join(project, ".mcp.json")
+	b, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, bytes.Replace(b, []byte(`"disabled":true`), []byte(`"disabled":false`), 1), 0o644)
+
+	code, out, errOut := runCLI(t, "scan", "--project", project, "--project-only", "--registry",
+		"--npm-registry", reg.URL, "--pypi-url", reg.URL, "--format", "json")
+	if code != 0 {
+		t.Fatalf("scan --registry: %d %s", code, errOut)
+	}
+	if !strings.Contains(out, `"VERSION-TOO-NEW"`) {
+		t.Errorf("registry findings missing:\n%s", out)
+	}
+	if code, _, _ := runCLI(t, "scan", "--project", project, "--cooldown", "-1"); code != 2 {
+		t.Errorf("negative cooldown accepted: %d", code)
 	}
 }

@@ -16,6 +16,7 @@ go install github.com/ELOATS/mcp-warden/cmd/mcp-warden@latest
 mcp-warden list               # 列出所有客户端里配置的服务器
 mcp-warden scan               # 静态审计（不执行任何东西）
 mcp-warden scan --probe       # 真正启动/连接服务器，检查它暴露的工具
+mcp-warden scan --registry    # 查询 npm / PyPI 元数据，检查每个包
 mcp-warden pin --probe        # 记录可信基线（~/.mcp-warden/lock.json）
 mcp-warden diff               # 和基线比较，有变化就以退出码 1 报警
 mcp-warden watch              # 每小时自动检查一次，有新变化就通知
@@ -34,6 +35,18 @@ mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"    # 推送到飞书 / 钉钉 /
 - 想交给 cron / launchd / systemd 定时调度，就用 `--once`：只检查一轮就退出，仍有未处理的变化时退出码为 1。例如 `17 * * * * mcp-warden watch --once`。
 
 > `--probe` 会像你的 MCP 客户端一样启动每个已启用的服务器（包括 `npx`/`uvx` 下载）。`scan`、`list` 和不带 `--probe` 的 `pin` 都不会执行任何东西。
+
+## 注册表元数据检查（scan --registry）
+
+只读取 npm / PyPI 的元数据，不下载、不执行任何代码。可以发现：
+
+- npm 已当作恶意软件下架的包（版本号变成 `0.0.1-security`），以及不存在的包或版本：拼写错误、依赖混淆、已被删除的包
+- **来源证明被去掉**：之前的版本都由 CI 带来源证明发布，这个版本却没有，这是发布 token 被盗的典型痕迹
+- **新发布者**：这个版本的发布者以前从没发过这个包。如果用的是 npm 可信发布（发布者是 CI），则不会报
+- 发布不满冷却期的版本（`--cooldown 7` 天），以及创建不到 30 天的包
+- `preinstall` / `install` / `postinstall` 脚本、被撤回或弃用的版本、没有源码仓库链接、每周下载量极低
+
+没有锁定版本的包，按它当前会解析到的版本来检查。国内可以用 `--npm-registry https://registry.npmmirror.com`（或者设置环境变量 `MCP_WARDEN_NPM_REGISTRY`）。
 
 ## 团队策略与 GitHub 代码扫描
 

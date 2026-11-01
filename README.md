@@ -37,6 +37,7 @@ release via GoReleaser (`.goreleaser.yaml`, `.github/workflows/release.yml`).
 mcp-warden list                       # what is configured, where
 mcp-warden scan                       # static audit of every config (runs nothing)
 mcp-warden scan --probe               # also start/connect to servers and inspect their tools
+mcp-warden scan --registry            # also check npm/PyPI metadata for every package
 mcp-warden pin --probe                # record a trusted baseline (~/.mcp-warden/lock.json)
 mcp-warden diff                       # what changed since the baseline? (exit 1 on changes)
 mcp-warden watch                      # re-check every hour, notify on new changes
@@ -49,6 +50,26 @@ Useful flags: `--project DIR`, `--project-only` (skip user configs),
 > `--probe` launches each enabled server's command exactly as your MCP client
 > would (including `npx`/`uvx` downloads). Static `scan`, `list` and a
 > config-only `pin` never execute anything.
+
+### Registry checks (`scan --registry`)
+
+Looks up the npm or PyPI metadata of every package a server is launched from
+(read-only HTTP requests; nothing is downloaded or executed) and flags:
+
+- packages npm removed as malware (`0.0.1-security` placeholders), and packages
+  or versions that do not exist (typos, dependency confusion, deleted packages)
+- **provenance dropped**: a release without provenance after CI-published
+  releases that had it, which is the trace of a stolen publish token
+- **new publisher**: a release by an account that never published the package
+  before (skipped for npm trusted publishing, where the publisher is CI)
+- releases younger than the cooldown (`--cooldown 7` days) and packages
+  younger than 30 days
+- `preinstall`/`install`/`postinstall` scripts, yanked and deprecated versions,
+  missing source repository links and very low weekly downloads
+
+Unpinned packages are evaluated at the version they currently resolve to. Use
+`--npm-registry https://registry.npmmirror.com` (or `MCP_WARDEN_NPM_REGISTRY`)
+for a mirror and `--pypi-url` for a PyPI-compatible index with the JSON API.
 
 ### Continuous monitoring (`watch`)
 
@@ -169,6 +190,10 @@ requests.
 | `TOOL-NAME-COLLISION`, `CROSS-TOOL-REFERENCE` | medium | tool shadowing across servers |
 | `NEW-SERVER`, `TOOL-ADDED` | medium | (diff) things added after pinning |
 | `POLICY-DENIED`, `POLICY-NOT-ALLOWED` | critical/high | server violates the team policy |
+| `REGISTRY-MALWARE-REMOVED` | critical | (`--registry`) npm removed the package as malware |
+| `REGISTRY-NOT-FOUND`, `REGISTRY-UNPUBLISHED`, `VERSION-NOT-FOUND`, `PROVENANCE-DROPPED` | high | (`--registry`) missing packages, stolen-token pattern |
+| `NEW-PUBLISHER`, `INSTALL-SCRIPTS`, `VERSION-TOO-NEW`, `PACKAGE-TOO-NEW`, `YANKED-VERSION` | medium | (`--registry`) takeover and fresh-release risk |
+| `DEPRECATED-VERSION`, `NO-SOURCE-REPO`, `LOW-DOWNLOADS` | low | (`--registry`) maintenance and adoption signals |
 | `SHELL-WRAPPER`, `CREDENTIAL-IN-ARGS`, `HOST-PID` | medium | opaque launchers, DB passwords in args |
 | `LEGACY-SSE`, `HOST-NETWORK`, `PROBE-FAILED`, … | low/info | hygiene |
 
@@ -188,6 +213,7 @@ internal/config       config discovery for each client (JSONC-tolerant)
 internal/audit        static rules, tool-definition rules, cross-server rules
 internal/probe        MCP client: stdio + Streamable HTTP, initialize + tools/list
 internal/lockfile     fingerprints, baseline, diff
+internal/registry     npm / PyPI metadata checks
 internal/policy       team policy: allow/deny lists, ignores, severity overrides
 internal/notify       desktop and webhook notifications for watch
 internal/report       text / JSON / SARIF output
@@ -198,7 +224,7 @@ internal/testserver   scripted MCP server used by the tests
 
 - prompts & resources inspection, OAuth-aware remote probing
 - central policy distribution and signed policies for organisations
-- live package metadata (publish age, maintainer changes, download counts)
+- on-disk cache for registry metadata; Docker image registry checks
 
 ## License
 

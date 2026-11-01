@@ -24,6 +24,7 @@ import (
 	"github.com/ELOATS/mcp-warden/internal/notify"
 	"github.com/ELOATS/mcp-warden/internal/policy"
 	"github.com/ELOATS/mcp-warden/internal/probe"
+	"github.com/ELOATS/mcp-warden/internal/registry"
 	"github.com/ELOATS/mcp-warden/internal/report"
 )
 
@@ -69,6 +70,13 @@ Common flags:
   --fail-on SEV       exit 1 if a finding is at or above SEV: info|low|medium|high|critical|none
   --show SEV          lowest severity printed in text output (default low)
   --lock FILE         lockfile path for pin/diff/watch
+
+Scan flags:
+  --registry          also check npm/PyPI metadata (malware removals, new publishers,
+                      install scripts, very new versions, yanked/deprecated, …)
+  --cooldown DAYS     versions younger than this are flagged (default 7)
+  --npm-registry URL  npm registry or mirror (or MCP_WARDEN_NPM_REGISTRY)
+  --pypi-url URL      PyPI base URL (or MCP_WARDEN_PYPI_URL)
 
 Watch flags:
   --interval DUR      time between checks (default 1h, minimum 1m)
@@ -311,9 +319,34 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 }
 
 type analysis struct {
-	env    config.Env
-	res    config.Result
-	probes map[string]*probe.Result
+	env      config.Env
+	res      config.Result
+	probes   map[string]*probe.Result
+	registry []audit.Finding
+}
+
+// checkRegistries looks up npm/PyPI metadata for every enabled server.
+func (a *analysis) checkRegistries(c *registry.Client, stderr io.Writer) {
+	fmt.Fprintln(stderr, "registry: fetching npm/PyPI metadata…")
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 6)
+	for _, s := range a.res.Servers {
+		if s.Disabled {
+			continue
+		}
+		wg.Add(1)
+		go func(s config.Server) {
+			defer wg.Done()
+			sem <- struct{}{}
+			fs := c.Check(context.Background(), s)
+			<-sem
+			mu.Lock()
+			a.registry = append(a.registry, fs...)
+			mu.Unlock()
+		}(s)
+	}
+	wg.Wait()
 }
 
 func (o *opts) analyze(stderr io.Writer, doProbe bool) (analysis, error) {
@@ -357,6 +390,7 @@ func (a analysis) report(pol *policy.Policy) report.Report {
 		views = append(views, v)
 	}
 	findings = append(findings, audit.CrossChecks(withTools)...)
+	findings = append(findings, a.registry...)
 	warnings := a.res.Warnings
 	suppressed := 0
 	if pol != nil {
@@ -446,6 +480,10 @@ func (a analysis) snapshots() []lockfile.Snapshot {
 
 func cmdScan(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("scan", stderr, "none")
+	useRegistry := fs.Bool("registry", false, "")
+	npmURL := fs.String("npm-registry", envOr("MCP_WARDEN_NPM_REGISTRY", registry.DefaultNPM), "")
+	pypiURL := fs.String("pypi-url", envOr("MCP_WARDEN_PYPI_URL", registry.DefaultPyPI), "")
+	cooldown := fs.Int("cooldown", 7, "")
 	if err := parse(fs, o, args); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
@@ -460,10 +498,23 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
+	if *cooldown < 0 {
+		fmt.Fprintln(stderr, "error: --cooldown must be >= 0 days")
+		return 2
+	}
 	a, err := o.analyze(stderr, o.probe)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
+	}
+	if *useRegistry {
+		rc := registry.New("mcp-warden/" + version + " (+https://github.com/ELOATS/mcp-warden)")
+		rc.NPM, rc.PyPI = *npmURL, *pypiURL
+		if *npmURL != registry.DefaultNPM {
+			rc.NPMDownloads = "" // mirrors do not serve the download-count API
+		}
+		rc.Cooldown = time.Duration(*cooldown) * 24 * time.Hour
+		a.checkRegistries(rc, stderr)
 	}
 	pol, err := o.loadPolicy(a.env)
 	if err != nil {
@@ -482,8 +533,15 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 		}
 	default:
 		report.WriteText(stdout, rep, o.styler(stdout), show)
-		if !o.probe && len(rep.Servers) > 0 {
-			fmt.Fprintln(stdout, "Tip: add --probe to inspect the tools each server actually exposes.")
+		if len(rep.Servers) > 0 && (!o.probe || !*useRegistry) {
+			var tips []string
+			if !o.probe {
+				tips = append(tips, "--probe to inspect the tools each server actually exposes")
+			}
+			if !*useRegistry {
+				tips = append(tips, "--registry to check npm/PyPI metadata")
+			}
+			fmt.Fprintln(stdout, "Tip: add "+strings.Join(tips, ", and ")+".")
 		}
 	}
 	if failing && audit.CountAtLeast(rep.All(), threshold) > 0 {
@@ -812,6 +870,13 @@ func cmdRules(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 func stamp() string { return time.Now().Format("2006-01-02 15:04:05") }

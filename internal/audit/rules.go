@@ -76,6 +76,26 @@ func init() {
 	rule("REMOVED-SERVER", "Pinned server is no longer configured", "")
 	rule("SERVER-VERSION-CHANGED", "Server reports a different version", "")
 	rule("TOOLS-NOT-VERIFIED", "Tool fingerprints could not be compared", "")
+	// Registry metadata (scan --registry)
+	rule("REGISTRY-MALWARE-REMOVED", "npm removed this package as malware",
+		"npm replaces malicious packages with a 0.0.1-security placeholder. Remove the server and rotate any credentials it could reach.")
+	rule("REGISTRY-NOT-FOUND", "Package does not exist on its registry",
+		"A missing package is a typo, a dependency-confusion setup, or a package removed for abuse. Anyone could register the name later.")
+	rule("REGISTRY-UNPUBLISHED", "Package has been unpublished", "The name can be re-registered by someone else.")
+	rule("VERSION-NOT-FOUND", "Pinned version does not exist on the registry", "")
+	rule("PACKAGE-TOO-NEW", "Package was created very recently", "New packages have no track record; most malicious packages are days old when discovered.")
+	rule("VERSION-TOO-NEW", "Version is younger than the cooldown period",
+		"Compromised releases are usually detected and pulled within days. A cooldown (default 7 days) avoids running them.")
+	rule("NEW-PUBLISHER", "Version published by an account that never published this package before",
+		"First releases by a new account are the signature of hijacked maintainer accounts and package takeovers.")
+	rule("PROVENANCE-DROPPED", "Release lacks provenance although earlier releases had it",
+		"Packages published from CI with npm trusted publishing carry provenance. A release without it is typically a manual publish with a stolen token.")
+	rule("INSTALL-SCRIPTS", "Package runs install scripts", "preinstall/install/postinstall scripts execute when npx downloads the package, before the server even starts.")
+	rule("DEPRECATED-VERSION", "Version is deprecated", "")
+	rule("YANKED-VERSION", "Version was yanked by its maintainers", "")
+	rule("NO-SOURCE-REPO", "Package links no source repository", "Without a source link the published artifact cannot be compared with reviewed code.")
+	rule("LOW-DOWNLOADS", "Package is rarely downloaded", "Rarely used packages get little scrutiny; typosquats typically have almost no downloads.")
+	rule("REGISTRY-UNREACHABLE", "Registry metadata could not be fetched", "")
 	// Policy
 	rule("POLICY-DENIED", "Server matches a deny rule in the team policy", "")
 	rule("POLICY-NOT-ALLOWED", "Server is not on the team policy allowlist", "Add it to the policy after review, or remove it.")
