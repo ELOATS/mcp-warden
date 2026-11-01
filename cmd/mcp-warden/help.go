@@ -42,6 +42,9 @@ var flagDocs = map[string]flagDoc{
 	"state":          {"FILE", "where already-alerted changes are remembered"},
 	"install":        {"", "install a per-user scheduled job (launchd, systemd timer or Task Scheduler) running these flags every --interval"},
 	"uninstall":      {"", "remove the scheduled job"},
+	"apply":          {"", "write the changes (default: preview only); each file is backed up next to it"},
+	"secrets":        {"", "also move literal env secrets into ~/.mcp-warden/secrets.env (Claude Code, Gemini CLI)"},
+	"server":         {"NAME", "only fix these servers (glob, repeatable)"},
 	"output":         {"FILE", "where to write the policy (default ./mcp-warden.policy.json)"},
 	"force":          {"", "overwrite an existing policy file"},
 }
@@ -62,6 +65,12 @@ var commands = []command{
 			"mcp-warden scan --offline                        # no network at all",
 			"mcp-warden scan --project-only --fail-on high    # CI gate",
 			"mcp-warden scan --format sarif > mcp.sarif       # GitHub code scanning"}},
+	{name: "fix", summary: "pin unpinned npx/uvx packages to a vetted release (and, with --secrets, move secrets out); previews unless --apply",
+		flags: []string{"apply", "secrets", "server", "project", "project-only", "config", "cooldown", "offline", "npm-registry", "pypi-url"},
+		examples: []string{
+			"mcp-warden fix                      # show what would change",
+			"mcp-warden fix --apply              # write it (each file is backed up first)",
+			"mcp-warden fix --secrets --apply    # also move literal secrets to ~/.mcp-warden/secrets.env"}},
 	{name: "list", summary: "list the MCP servers configured for this user and project",
 		flags: []string{"project", "project-only", "config", "json"}},
 	{name: "pin", summary: "record a trusted baseline of configs (and, with --probe, tool definitions)",

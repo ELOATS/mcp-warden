@@ -70,6 +70,18 @@ func looksLikePlainValue(v string) bool {
 		strings.Contains(v, "\\") || strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://")
 }
 
+// Redact masks a secret for display.
+func Redact(v string) string { return redact(v) }
+
+// literalSecretEnv reports whether env var k holds a credential in plain
+// text (rather than a reference such as ${VAR}).
+func literalSecretEnv(k, v string) bool {
+	if isRef(v) {
+		return false
+	}
+	return secretKind(v) != "" || (sensitiveKey(k) && len(v) >= 8 && !looksLikePlainValue(v))
+}
+
 func redact(v string) string {
 	if len(v) <= 8 {
 		return "****"

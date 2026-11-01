@@ -79,7 +79,7 @@ func checkLaunch(s config.Server, opt Options, add func(Finding)) {
 			}
 			add(Finding{Rule: "UNPINNED-PACKAGE", Severity: Medium,
 				Message: fmt.Sprintf("not pinned (%s): every launch can install a new, possibly compromised, release", ver),
-				Fix:     "Pin an exact version, e.g. " + example + "."})
+				Fix:     "Pin an exact version, e.g. " + example + ", or run `mcp-warden fix` to pick a vetted one."})
 		}
 		if l.Package == "mcp-remote" {
 			for _, a := range l.Rest {
@@ -278,6 +278,18 @@ func checkSecrets(s config.Server, add func(Finding)) {
 				Message: fmt.Sprintf("header %s contains a literal credential", k), Evidence: redact(bare), Fix: secretFix})
 		}
 	}
+}
+
+// SecretEnvKeys lists env vars of s whose values are literal credentials,
+// using the same rules as the PLAINTEXT-SECRET finding.
+func SecretEnvKeys(s config.Server) []string {
+	var out []string
+	for _, k := range sortedKeys(s.Env) {
+		if literalSecretEnv(k, s.Env[k]) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Describe returns a short, redacted, human-readable launch description.

@@ -29,6 +29,9 @@ type Server struct {
 	URL       string            `json:"url,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Disabled  bool              `json:"disabled,omitempty"`
+	// Path is the JSON path of this server's object inside Source (e.g.
+	// ["mcpServers", "github"]), used by `fix` to edit it in place.
+	Path []string `json:"-"`
 }
 
 // ID is a stable, machine-portable identifier used in reports and lockfiles.
@@ -167,39 +170,39 @@ func parse(src source, data []byte, e Env) ([]Server, []string, error) {
 	loc := displayPath(src, e)
 	var out []Server
 	var warns []string
-	add := func(block json.RawMessage, project string) {
-		ss, w := parseBlock(block, src, loc, project)
+	add := func(block json.RawMessage, project string, prefix ...string) {
+		ss, w := parseBlock(block, src, loc, project, prefix)
 		out = append(out, ss...)
 		warns = append(warns, w...)
 	}
 	vscodeSettings := func() {
 		var m map[string]json.RawMessage
 		if raw, ok := top["mcp"]; ok && json.Unmarshal(raw, &m) == nil {
-			add(m["servers"], "")
+			add(m["servers"], "", "mcp", "servers")
 		}
 	}
 	switch src.kind {
 	case kindMCPServers:
-		add(top["mcpServers"], "")
+		add(top["mcpServers"], "", "mcpServers")
 	case kindServers:
-		add(top["servers"], "")
+		add(top["servers"], "", "servers")
 	case kindVSCodeSettings:
 		vscodeSettings()
 	case kindClaudeCode:
-		add(top["mcpServers"], "")
+		add(top["mcpServers"], "", "mcpServers")
 		if raw, ok := top["projects"]; ok {
 			var projects map[string]struct {
 				MCPServers json.RawMessage `json:"mcpServers"`
 			}
 			if err := json.Unmarshal(raw, &projects); err == nil {
 				for _, k := range sortedKeys(projects) {
-					add(projects[k].MCPServers, k)
+					add(projects[k].MCPServers, k, "projects", k, "mcpServers")
 				}
 			}
 		}
 	case kindAuto:
-		add(top["mcpServers"], "")
-		add(top["servers"], "")
+		add(top["mcpServers"], "", "mcpServers")
+		add(top["servers"], "", "servers")
 		vscodeSettings()
 	}
 	return out, warns, nil
@@ -218,7 +221,7 @@ type rawServer struct {
 	Disabled  bool           `json:"disabled"`
 }
 
-func parseBlock(block json.RawMessage, src source, loc, project string) ([]Server, []string) {
+func parseBlock(block json.RawMessage, src source, loc, project string, prefix []string) ([]Server, []string) {
 	if len(block) == 0 || string(block) == "null" {
 		return nil, nil
 	}
@@ -249,6 +252,7 @@ func parseBlock(block json.RawMessage, src source, loc, project string) ([]Serve
 			URL:       u,
 			Headers:   stringMap(r.Headers),
 			Disabled:  r.Disabled,
+			Path:      append(append([]string(nil), prefix...), name),
 		}
 		if project != "" {
 			s.Scope = "local"

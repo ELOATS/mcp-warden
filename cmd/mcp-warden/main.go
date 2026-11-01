@@ -62,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdDiff(args[1:], stdout, stderr)
 	case "watch":
 		return cmdWatch(args[1:], stdout, stderr)
+	case "fix":
+		return cmdFix(args[1:], stdout, stderr)
 	case "policy":
 		return cmdPolicy(args[1:], stdout, stderr)
 	case "rules":
@@ -504,6 +506,15 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 		}
 	default:
 		report.WriteText(stdout, rep, o.styler(stdout), report.TextOptions{MinShown: show, Verbose: *verbose})
+		fixable := 0
+		for _, f := range rep.All() {
+			if f.Rule == "UNPINNED-PACKAGE" {
+				fixable++
+			}
+		}
+		if fixable > 0 {
+			fmt.Fprintf(stdout, "Tip: 'mcp-warden fix' can pin %s to a vetted release (preview first, backups kept).\n", pluralize(fixable, "unpinned package"))
+		}
 		if len(rep.Servers) > 0 && !o.probe {
 			fmt.Fprintln(stdout, "Tip: add --probe to also inspect the tools each server exposes (this starts the servers).")
 		}

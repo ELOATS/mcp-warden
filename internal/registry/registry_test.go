@@ -261,3 +261,53 @@ func TestCooldownSeverity(t *testing.T) {
 		t.Errorf("unpinned fresh latest: %s, want low (UNPINNED-PACKAGE carries the fix)", got)
 	}
 }
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.10.0", "1.9.2", 1}, {"2025.10.1", "2025.9.30", 1}, {"1.2", "1.2.0", 0}, {"0.0.84", "0.0.9", 1}, {"1.0.0", "1.0.0", 0}, {"2.0.0", "10.0.0", -1},
+	}
+	for _, c := range cases {
+		if got := compareVersions(c.a, c.b); got != c.want {
+			t.Errorf("compareVersions(%s, %s) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestPinCandidate(t *testing.T) {
+	srv, _ := fakeRegistry(t)
+	defer srv.Close()
+	c := client(srv)
+	ctx := context.Background()
+
+	// Latest (1.2.0, 100 days old) is old enough.
+	if got, err := c.PinCandidate(ctx, "npm", "@acme/good"); err != nil || got.Version != "1.2.0" || got.Latest != "1.2.0" {
+		t.Errorf("good: %+v %v", got, err)
+	}
+	// Latest 2.3.0 is 1 day old: pick the newest older release.
+	if got, err := c.PinCandidate(ctx, "npm", "hijacked"); err != nil || got.Version != "2.2.0" || got.Latest != "2.3.0" {
+		t.Errorf("hijacked: %+v %v", got, err)
+	}
+	// Only release is 3 days old and deprecated: nothing to pin, and the reason says why.
+	if _, err := c.PinCandidate(ctx, "npm", "fresh-mcp"); err == nil || !strings.Contains(err.Error(), "deprecated") {
+		t.Errorf("fresh-mcp: %v", err)
+	}
+	// Brand-new but healthy package: "not old enough yet".
+	c.Cooldown = 1000 * 24 * time.Hour
+	if _, err := c.PinCandidate(ctx, "npm", "@acme/good"); err == nil || !strings.Contains(err.Error(), "older than") {
+		t.Errorf("cooldown message: %v", err)
+	}
+	c.Cooldown = 7 * 24 * time.Hour
+	if _, err := c.PinCandidate(ctx, "npm", "evil-mcp"); err == nil || !strings.Contains(err.Error(), "malware") {
+		t.Errorf("malware package must not be pinned: %v", err)
+	}
+	if _, err := c.PinCandidate(ctx, "npm", "nope-mcp"); err == nil {
+		t.Error("missing package pinned")
+	}
+	// PyPI: 1.3.0 is 2 days old, 1.2.0 is yanked, so 1.0.0.
+	if got, err := c.PinCandidate(ctx, "pypi", "mcp_server.fetch"); err != nil || got.Version != "1.0.0" || got.Latest != "1.3.0" {
+		t.Errorf("pypi: %+v %v", got, err)
+	}
+}

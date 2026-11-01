@@ -489,3 +489,50 @@ func TestWatchCreatesBaselineOnFirstRun(t *testing.T) {
 		t.Errorf("second run re-pinned:\n%s", out)
 	}
 }
+
+func TestFixCommand(t *testing.T) {
+	project, _ := setup(t)
+	now := time.Now().UTC()
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/demo-mcp" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"dist-tags": map[string]string{"latest": "1.1.0"},
+			"time":      map[string]string{"1.0.0": now.AddDate(0, 0, -90).Format(time.RFC3339), "1.1.0": now.Add(-time.Hour).Format(time.RFC3339)},
+			"versions":  map[string]any{"1.0.0": map[string]any{}, "1.1.0": map[string]any{}},
+		})
+	}))
+	defer reg.Close()
+	cfg := filepath.Join(project, "extra.json")
+	orig := `{"mcpServers": {"demo": {"command": "npx", "args": ["-y", "demo-mcp"]}}}`
+	_ = os.WriteFile(cfg, []byte(orig), 0o644)
+	t.Setenv("MCP_WARDEN_OFFLINE", "")
+	t.Setenv("MCP_WARDEN_NPM_REGISTRY", reg.URL)
+	base := []string{"fix", "--project", project, "--project-only", "--config", cfg, "--server", "demo"}
+
+	code, out, errOut := runCLI(t, base...)
+	if code != 0 || !strings.Contains(out, "demo-mcp  →  demo-mcp@1.0.0") || !strings.Contains(out, "preview") {
+		t.Fatalf("preview: %d\n%s%s", code, out, errOut)
+	}
+	if b, _ := os.ReadFile(cfg); string(b) != orig {
+		t.Fatal("preview modified the file")
+	}
+	code, out, errOut = runCLI(t, append(base, "--apply")...)
+	if code != 0 || !strings.Contains(out, "1 change written") {
+		t.Fatalf("apply: %d\n%s%s", code, out, errOut)
+	}
+	if b, _ := os.ReadFile(cfg); string(b) != strings.Replace(orig, `"demo-mcp"`, `"demo-mcp@1.0.0"`, 1) {
+		t.Errorf("applied file:\n%s", b)
+	}
+	if _, out, _ := runCLI(t, base...); !strings.Contains(out, "Nothing to change") {
+		t.Errorf("second run should be a no-op:\n%s", out)
+	}
+	cfg2 := filepath.Join(project, "extra2.json")
+	_ = os.WriteFile(cfg2, []byte(`{"mcpServers": {"other": {"command": "npx", "args": ["-y", "demo-mcp"]}}}`), 0o644)
+	code, out, _ = runCLI(t, "fix", "--project", project, "--project-only", "--config", cfg2, "--offline", "--apply")
+	if code != 0 || !strings.Contains(out, "registry lookups are off (--offline)") || !strings.Contains(out, "Nothing to change") {
+		t.Errorf("offline fix: %d\n%s", code, out)
+	}
+}

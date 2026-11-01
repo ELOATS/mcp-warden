@@ -79,6 +79,32 @@ with a single warning, so offline machines are not slowed down. Use
 `--npm-registry https://registry.npmmirror.com` (or `MCP_WARDEN_NPM_REGISTRY`)
 for a mirror and `--pypi-url` for a PyPI-compatible index with the JSON API.
 
+### Fixing findings (`fix`)
+
+```sh
+mcp-warden fix                    # preview: what would change, and what cannot be fixed automatically
+mcp-warden fix --apply            # write it
+mcp-warden fix --secrets --apply  # also move literal secrets out of the config
+```
+
+`fix` pins every unpinned `npx`/`uvx` package to the newest stable release
+that is older than the cooldown (`--cooldown 7` days) and is not a
+prerelease, deprecated or yanked. Packages removed as malware, missing
+packages, version ranges and git sources are listed but never pinned.
+
+With `--secrets`, literal credentials in `env` are moved to
+`~/.mcp-warden/secrets.env` (0600) and replaced with `${NAME}` references, for
+Claude Code and Gemini CLI, which expand variables and inherit the shell
+environment. GUI clients are skipped with instructions, because apps started
+from a dock or start menu often do not see shell variables.
+
+Edits are surgical: only the changed strings are rewritten, so comments,
+formatting and key order are preserved. Before writing, `fix` re-reads each
+file and refuses to continue if it changed since the preview; the result is
+re-parsed and verified, written atomically, and the original is kept next to
+it as `<file>.mcp-warden-<time>.bak`. Re-run `mcp-warden pin` afterwards if
+you use `diff` or `watch`.
+
 ### Continuous monitoring (`watch`)
 
 ```sh
@@ -220,7 +246,7 @@ internal/testserver   scripted MCP server used by the tests
 
 - prompts & resources inspection, OAuth-aware remote probing
 - central policy distribution and signed policies for organisations
-- on-disk cache for registry metadata; Docker image registry checks
+- on-disk cache for registry metadata; Docker image digests in `fix`
 
 ## License
 

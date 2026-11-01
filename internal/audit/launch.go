@@ -15,6 +15,19 @@ type Launch struct {
 	Script  string   // inline script for shell wrappers
 	Docker  []string // docker run flags, normalised to "--flag=value"
 	Rest    []string // arguments passed on to the server itself
+
+	// For npx/uvx: where the package spec sits in the original args, so it
+	// can be rewritten. SpecPrefix is "--package=" / "--from=" for joined forms.
+	HasSpec    bool
+	SpecIndex  int
+	SpecPrefix string
+}
+
+func (l Launch) shift(n int) Launch {
+	if l.HasSpec {
+		l.SpecIndex += n
+	}
+	return l
 }
 
 // ParseLaunch infers the launcher from a command and its arguments.
@@ -22,7 +35,7 @@ func ParseLaunch(command string, args []string) Launch {
 	base := normBase(command)
 	switch {
 	case base == "cmd" && len(args) >= 2 && strings.EqualFold(args[0], "/c"):
-		return ParseLaunch(args[1], args[2:])
+		return ParseLaunch(args[1], args[2:]).shift(2)
 	case isShell(base):
 		for i, a := range args {
 			if a == "-c" || a == "-lc" || a == "-ic" || strings.EqualFold(a, "-command") || strings.EqualFold(a, "-c") {
@@ -38,15 +51,15 @@ func ParseLaunch(command string, args []string) Launch {
 	case base == "npx" || base == "bunx":
 		return parseNode(args)
 	case base == "npm" && len(args) > 0 && args[0] == "exec":
-		return parseNode(args[1:])
+		return parseNode(args[1:]).shift(1)
 	case (base == "pnpm" || base == "yarn") && len(args) > 0 && args[0] == "dlx":
-		return parseNode(args[1:])
+		return parseNode(args[1:]).shift(1)
 	case base == "uvx":
 		return parsePy(args)
 	case base == "uv" && len(args) >= 2 && args[0] == "tool" && args[1] == "run":
-		return parsePy(args[2:])
+		return parsePy(args[2:]).shift(2)
 	case base == "pipx" && len(args) >= 1 && args[0] == "run":
-		return parsePy(args[1:])
+		return parsePy(args[1:]).shift(1)
 	case (base == "docker" || base == "podman") && len(args) > 0 && args[0] == "run":
 		return parseDocker(args[1:])
 	case isInterpreter(base):
@@ -100,16 +113,19 @@ func parseNode(args []string) Launch {
 		case a == "--":
 		case strings.HasPrefix(a, "--package="):
 			spec = strings.TrimPrefix(a, "--package=")
+			l.HasSpec, l.SpecIndex, l.SpecPrefix = true, i, "--package="
 		case a == "-p" || a == "--package":
 			if i+1 < len(args) {
 				i++
 				spec = args[i]
+				l.HasSpec, l.SpecIndex, l.SpecPrefix = true, i, ""
 			}
 		case strings.HasPrefix(a, "-"):
 			// boolean flag such as -y / --yes / --quiet
 		default:
 			if spec == "" {
 				spec = a
+				l.HasSpec, l.SpecIndex, l.SpecPrefix = true, i, ""
 			}
 			l.Rest = args[i+1:]
 			i = len(args)
@@ -155,13 +171,18 @@ func parsePy(args []string) Launch {
 				i++
 				if a == "--from" || a == "--spec" {
 					from = args[i]
+					l.HasSpec, l.SpecIndex, l.SpecPrefix = true, i, ""
 				}
 			}
 		case strings.HasPrefix(a, "--from="):
 			from = strings.TrimPrefix(a, "--from=")
+			l.HasSpec, l.SpecIndex, l.SpecPrefix = true, i, "--from="
 		case strings.HasPrefix(a, "-"):
 		default:
 			first = a
+			if from == "" {
+				l.HasSpec, l.SpecIndex, l.SpecPrefix = true, i, ""
+			}
 			l.Rest = args[i+1:]
 			i = len(args)
 		}

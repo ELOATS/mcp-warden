@@ -218,3 +218,32 @@ func TestTyposquatSkipsExact(t *testing.T) {
 		t.Error("unrelated package flagged")
 	}
 }
+
+func TestSpecIndex(t *testing.T) {
+	cases := []struct {
+		cmd    string
+		args   []string
+		idx    int
+		prefix string
+	}{
+		{"npx", []string{"-y", "@a/b"}, 1, ""},
+		{"npx", []string{"--package=@a/b@1", "b"}, 0, "--package="},
+		{"npx", []string{"-y", "-p", "pkg", "bin"}, 2, ""},
+		{"cmd", []string{"/c", "npx", "-y", "pkg"}, 3, ""},
+		{"npm", []string{"exec", "pkg"}, 1, ""},
+		{"uvx", []string{"mcp-server-fetch"}, 0, ""},
+		{"uvx", []string{"--from", "pkg[x]", "bin"}, 1, ""},
+		{"uvx", []string{"--from=pkg", "bin"}, 0, "--from="},
+		{"uv", []string{"tool", "run", "pkg"}, 2, ""},
+	}
+	for _, c := range cases {
+		l := ParseLaunch(c.cmd, c.args)
+		if !l.HasSpec || l.SpecIndex != c.idx || l.SpecPrefix != c.prefix {
+			t.Errorf("%s %v: spec at %d %q (has=%v), want %d %q", c.cmd, c.args, l.SpecIndex, l.SpecPrefix, l.HasSpec, c.idx, c.prefix)
+			continue
+		}
+		if got := strings.TrimPrefix(c.args[l.SpecIndex], l.SpecPrefix); !strings.HasPrefix(got, l.Package) {
+			t.Errorf("%s %v: arg %q does not hold package %q", c.cmd, c.args, got, l.Package)
+		}
+	}
+}
