@@ -28,12 +28,14 @@ type ServerView struct {
 
 // Report is the result of a scan.
 type Report struct {
-	Generator string          `json:"generator"`
-	Files     []string        `json:"files"`
-	Warnings  []string        `json:"warnings,omitempty"`
-	Servers   []ServerView    `json:"servers"`
-	Global    []audit.Finding `json:"global,omitempty"`
-	Summary   map[string]int  `json:"summary"`
+	Generator  string          `json:"generator"`
+	Files      []string        `json:"files"`
+	Warnings   []string        `json:"warnings,omitempty"`
+	Policy     string          `json:"policy,omitempty"`     // policy file in effect
+	Suppressed int             `json:"suppressed,omitempty"` // findings hidden by policy ignores
+	Servers    []ServerView    `json:"servers"`
+	Global     []audit.Finding `json:"global,omitempty"`
+	Summary    map[string]int  `json:"summary"`
 }
 
 // New distributes findings to their servers.
@@ -125,6 +127,9 @@ func (s Styler) Sev(sev audit.Severity) string {
 // WriteText renders a scan report for humans.
 func WriteText(w io.Writer, r Report, st Styler, minShown audit.Severity) {
 	fmt.Fprintf(w, "%s — %d config file(s), %d server(s)\n", st.Bold(r.Generator), len(r.Files), len(r.Servers))
+	if r.Policy != "" {
+		fmt.Fprintf(w, "%s %s (%d finding(s) suppressed by ignore rules)\n", st.Dim("policy:"), r.Policy, r.Suppressed)
+	}
 	for _, warn := range r.Warnings {
 		fmt.Fprintf(w, "%s %s\n", st.Dim("warning:"), warn)
 	}

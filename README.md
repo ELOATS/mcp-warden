@@ -43,8 +43,8 @@ mcp-warden watch                      # re-check every hour, notify on new chang
 ```
 
 Useful flags: `--project DIR`, `--project-only` (skip user configs),
-`--config FILE` (repeatable), `--json`, `--fail-on high`, `--show info`,
-`--timeout 30s`, `--lock FILE`.
+`--config FILE` (repeatable), `--format text|json|sarif`, `--fail-on high`,
+`--show info`, `--policy FILE`, `--timeout 30s`, `--lock FILE`.
 
 > `--probe` launches each enabled server's command exactly as your MCP client
 > would (including `npx`/`uvx` downloads). Static `scan`, `list` and a
@@ -90,14 +90,64 @@ systemctl --user enable --now mcp-warden.timer
 On macOS, a launchd agent with `StartInterval` 3600 running
 `mcp-warden watch --once` does the same job.
 
-### CI gate (GitHub Actions)
+### Team policy (`mcp-warden.policy.json`)
+
+Commit a policy to the repository to decide which MCP servers your team may
+run. It is picked up automatically from the project root (then
+`~/.mcp-warden/policy.json`); `--policy FILE` and `--no-policy` override that.
+
+```sh
+mcp-warden policy init --project-only   # allow exactly what is configured today
+```
+
+```jsonc
+{
+  "version": 1,
+  "allow": {                                   // if any list is set, everything else is POLICY-NOT-ALLOWED (high)
+    "npm":     ["@modelcontextprotocol/*@*", "@your-org/*"],   // name or name@version, * and ? globs
+    "pypi":    ["mcp-server-fetch==*"],
+    "docker":  ["ghcr.io/github/github-mcp-server@sha256:*"],
+    "remote":  ["https://mcp.your-org.com/*"],
+    "command": ["/opt/your-org/bin/*"]
+  },
+  "deny":   { "npm": ["*desktop-commander*"] },                 // POLICY-DENIED (critical)
+  "ignore": [                                                   // reason is required; expires is optional
+    { "rule": "CAP-EXEC", "server": "sandbox-shell", "reason": "runs in a throwaway VM", "expires": "2027-01-31" }
+  ],
+  "severity": { "UNPINNED-PACKAGE": "high" }                    // tighten (or relax) any rule
+}
+```
+
+Allow/deny lists are enforced by `scan`; ignores and severity overrides apply to
+`scan`, `diff` and `watch`. Unknown keys, unknown rule IDs and ignores without
+a reason are errors, so a typo cannot silently weaken the policy, and expired
+ignores stop applying. `mcp-warden rules` lists every rule ID.
+
+### CI gate and GitHub code scanning
 
 ```yaml
-- uses: actions/setup-go@v5
-  with: { go-version: "1.22" }
-- run: go install github.com/ELOATS/mcp-warden/cmd/mcp-warden@latest
-- run: mcp-warden scan --project-only --fail-on high
+name: mcp-warden
+on: [push, pull_request]
+permissions:
+  contents: read
+  security-events: write   # upload SARIF
+jobs:
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - run: go install github.com/ELOATS/mcp-warden/cmd/mcp-warden@latest
+      - run: mcp-warden scan --project-only --format sarif > mcp-warden.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: mcp-warden.sarif, category: mcp-warden }
+      - run: mcp-warden scan --project-only --fail-on high   # fail the build
 ```
+
+Findings show up under **Security → Code scanning** and as annotations on the
+exact line of `.mcp.json`, `.cursor/mcp.json` or `.vscode/mcp.json` in pull
+requests.
 
 ## What it checks
 
@@ -118,6 +168,7 @@ On macOS, a launchd agent with `StartInterval` 3600 running
 | `LETHAL-TRIFECTA` | medium | one client mixes web-fetching tools with local-data/exec tools |
 | `TOOL-NAME-COLLISION`, `CROSS-TOOL-REFERENCE` | medium | tool shadowing across servers |
 | `NEW-SERVER`, `TOOL-ADDED` | medium | (diff) things added after pinning |
+| `POLICY-DENIED`, `POLICY-NOT-ALLOWED` | critical/high | server violates the team policy |
 | `SHELL-WRAPPER`, `CREDENTIAL-IN-ARGS`, `HOST-PID` | medium | opaque launchers, DB passwords in args |
 | `LEGACY-SSE`, `HOST-NETWORK`, `PROBE-FAILED`, … | low/info | hygiene |
 
@@ -137,14 +188,16 @@ internal/config       config discovery for each client (JSONC-tolerant)
 internal/audit        static rules, tool-definition rules, cross-server rules
 internal/probe        MCP client: stdio + Streamable HTTP, initialize + tools/list
 internal/lockfile     fingerprints, baseline, diff
-internal/report       text / JSON output
+internal/policy       team policy: allow/deny lists, ignores, severity overrides
+internal/notify       desktop and webhook notifications for watch
+internal/report       text / JSON / SARIF output
 internal/testserver   scripted MCP server used by the tests
 ```
 
 ## Roadmap
 
 - prompts & resources inspection, OAuth-aware remote probing
-- signed allowlist policy for teams (`mcp-warden.policy.json`), SARIF output
+- central policy distribution and signed policies for organisations
 - live package metadata (publish age, maintainer changes, download counts)
 
 ## License

@@ -195,3 +195,154 @@ func TestWatchFlagErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicyLifecycle(t *testing.T) {
+	project, _ := setup(t)
+	// Generate a policy from the current project setup and commit-style use it.
+	if code, out, errOut := runCLI(t, "policy", "init", "--project", project, "--project-only"); code != 0 || !strings.Contains(out, "allow pattern") {
+		t.Fatalf("policy init: %d %s %s", code, out, errOut)
+	}
+	if code, _, errOut := runCLI(t, "policy", "init", "--project", project, "--project-only"); code != 2 || !strings.Contains(errOut, "--force") {
+		t.Fatalf("policy init overwrote: %d %s", code, errOut)
+	}
+	code, out, _ := runCLI(t, "scan", "--project", project, "--project-only")
+	if code != 0 || !strings.Contains(out, "policy: ") || strings.Contains(out, "POLICY-") {
+		t.Fatalf("scan with generated policy: %d\n%s", code, out)
+	}
+
+	// A new, unreviewed server is rejected by the allowlist.
+	cfgPath := filepath.Join(project, ".mcp.json")
+	var cfg map[string]map[string]any
+	b, _ := os.ReadFile(cfgPath)
+	_ = json.Unmarshal(b, &cfg)
+	cfg["mcpServers"]["sneaky"] = map[string]any{"command": "npx", "args": []string{"-y", "totally-legit-mcp@1.0.0"}}
+	b, _ = json.Marshal(cfg)
+	_ = os.WriteFile(cfgPath, b, 0o644)
+	code, out, _ = runCLI(t, "scan", "--project", project, "--project-only", "--fail-on", "high")
+	if code != 1 || !strings.Contains(out, "POLICY-NOT-ALLOWED") {
+		t.Fatalf("unlisted server not rejected: %d\n%s", code, out)
+	}
+
+	// Documented ignores suppress findings; severity overrides apply.
+	pol := `{"version": 1,
+	  "deny": {"npm": ["totally-legit-*"]},
+	  "ignore": [{"rule": "UNPINNED-PACKAGE", "server": "gh", "reason": "disabled server"},
+	             {"rule": "PLAINTEXT-SECRET", "reason": "fixture token"}],
+	  "severity": {"LOCAL-SCRIPT": "high"}}`
+	polPath := filepath.Join(t.TempDir(), "p.json")
+	_ = os.WriteFile(polPath, []byte(pol), 0o644)
+	code, out, _ = runCLI(t, "scan", "--project", project, "--project-only", "--policy", polPath, "--format", "json")
+	var rep struct {
+		Policy     string `json:"policy"`
+		Suppressed int    `json:"suppressed"`
+		Summary    map[string]int
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("json: %v\n%s", err, out)
+	}
+	if rep.Policy != polPath || rep.Suppressed < 2 || rep.Summary["critical"] != 1 {
+		t.Errorf("policy apply: %+v\n%s", rep, out)
+	}
+	if strings.Contains(out, `"rule": "PLAINTEXT-SECRET"`) {
+		t.Error("ignored rule still reported")
+	}
+
+	// Broken policies are hard errors, never silently skipped.
+	_ = os.WriteFile(polPath, []byte(`{"version": 1, "ignroe": []}`), 0o644)
+	if code, _, errOut := runCLI(t, "scan", "--project", project, "--policy", polPath); code != 2 || !strings.Contains(errOut, "policy") {
+		t.Errorf("invalid policy: %d %s", code, errOut)
+	}
+	if code, _, _ := runCLI(t, "scan", "--project", project, "--policy", polPath, "--no-policy"); code != 0 {
+		t.Errorf("--no-policy did not skip the policy: %d", code)
+	}
+}
+
+func TestSARIF(t *testing.T) {
+	project, _ := setup(t)
+	code, out, errOut := runCLI(t, "scan", "--project", project, "--project-only", "--format", "sarif")
+	if code != 0 {
+		t.Fatalf("sarif scan: %d %s", code, errOut)
+	}
+	var log struct {
+		Version string `json:"version"`
+		Runs    []struct {
+			Tool struct {
+				Driver struct {
+					Name  string `json:"name"`
+					Rules []struct {
+						ID         string         `json:"id"`
+						Properties map[string]any `json:"properties"`
+					} `json:"rules"`
+				} `json:"driver"`
+			} `json:"tool"`
+			Results []struct {
+				RuleID    string `json:"ruleId"`
+				RuleIndex int    `json:"ruleIndex"`
+				Level     string `json:"level"`
+				Message   struct{ Text string }
+				Locations []struct {
+					PhysicalLocation struct {
+						ArtifactLocation struct {
+							URI       string `json:"uri"`
+							URIBaseID string `json:"uriBaseId"`
+						} `json:"artifactLocation"`
+						Region struct {
+							StartLine int `json:"startLine"`
+						} `json:"region"`
+					} `json:"physicalLocation"`
+				} `json:"locations"`
+				PartialFingerprints map[string]string `json:"partialFingerprints"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(out), &log); err != nil {
+		t.Fatalf("invalid SARIF JSON: %v", err)
+	}
+	if log.Version != "2.1.0" || len(log.Runs) != 1 || log.Runs[0].Tool.Driver.Name != "mcp-warden" {
+		t.Fatalf("bad SARIF envelope: %+v", log)
+	}
+	run := log.Runs[0]
+	cfg, _ := os.ReadFile(filepath.Join(project, ".mcp.json"))
+	ghLine := 0
+	for i, l := range strings.Split(string(cfg), "\n") {
+		if strings.Contains(l, `"gh":`) {
+			ghLine = i + 1
+		}
+	}
+	found := false
+	for _, r := range run.Results {
+		if run.Tool.Driver.Rules[r.RuleIndex].ID != r.RuleID {
+			t.Errorf("ruleIndex mismatch for %s", r.RuleID)
+		}
+		loc := r.Locations[0].PhysicalLocation
+		if loc.ArtifactLocation.URI != ".mcp.json" || loc.ArtifactLocation.URIBaseID != "%SRCROOT%" {
+			t.Errorf("location not project-relative: %+v", loc)
+		}
+		if r.PartialFingerprints["mcpWarden/v1"] == "" {
+			t.Error("missing fingerprint")
+		}
+		if r.RuleID == "PLAINTEXT-SECRET" {
+			found = true
+			if r.Level != "error" || loc.Region.StartLine != ghLine {
+				t.Errorf("PLAINTEXT-SECRET: level %s line %d (want error, %d)", r.Level, loc.Region.StartLine, ghLine)
+			}
+			if strings.Contains(r.Message.Text, strings.Repeat("a", 36)) {
+				t.Error("SARIF leaks the token")
+			}
+		}
+	}
+	if !found {
+		t.Error("PLAINTEXT-SECRET missing from SARIF")
+	}
+	for _, rule := range run.Tool.Driver.Rules {
+		if rule.Properties["security-severity"] == nil {
+			t.Errorf("rule %s lacks security-severity", rule.ID)
+		}
+	}
+	if code, _, _ := runCLI(t, "scan", "--format", "xml"); code != 2 {
+		t.Errorf("bad --format accepted: %d", code)
+	}
+	if code, out, _ := runCLI(t, "rules"); code != 0 || !strings.Contains(out, "TOOL-POISONING") {
+		t.Errorf("rules: %d", code)
+	}
+}

@@ -35,6 +35,22 @@ mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"    # 推送到飞书 / 钉钉 /
 
 > `--probe` 会像你的 MCP 客户端一样启动每个已启用的服务器（包括 `npx`/`uvx` 下载）。`scan`、`list` 和不带 `--probe` 的 `pin` 都不会执行任何东西。
 
+## 团队策略与 GitHub 代码扫描
+
+在仓库根目录提交一份 `mcp-warden.policy.json`，规定团队允许运行哪些 MCP 服务器：
+
+```sh
+mcp-warden policy init --project-only     # 把当前配置一键生成为白名单
+```
+
+- **allow**：按 npm / pypi / docker / remote / command 分别写白名单，支持 `*` 通配和版本约束（如 `@your-org/*`、`mcp-server-fetch==1.*`）。只要写了白名单，名单外的服务器就会报 `POLICY-NOT-ALLOWED`（high）。
+- **deny**：黑名单，命中就报 `POLICY-DENIED`（critical）。
+- **ignore**：忽略某条规则，可以只针对某个服务器或工具。**必须写明原因**，可选过期日期，过期后自动失效。
+- **severity**：调整规则的严重程度，比如要求"没锁版本"一律算 high。
+- 写错字段名、写了不存在的规则、或忽略规则没写原因，都会直接报错，避免策略被悄悄削弱。用 `mcp-warden rules` 可以查看所有规则 ID。
+
+用 `--format sarif` 生成 SARIF 文件，上传到 GitHub 代码扫描后，问题会直接标在 PR 里 `.mcp.json` 的对应行上。完整的 GitHub Actions 配置见 [README.md](README.md#ci-gate-and-github-code-scanning)。
+
 ## 能发现什么
 
 - **工具投毒**：描述里的"忽略之前的指令""不要告诉用户"、`<IMPORTANT>` 标签、读取 `~/.ssh` 等；隐藏的零宽 / 双向控制字符

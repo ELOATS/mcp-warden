@@ -1,8 +1,6 @@
 package notify
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -20,10 +18,7 @@ type State struct {
 }
 
 // Key identifies a finding across runs.
-func Key(f audit.Finding) string {
-	h := sha256.Sum256([]byte(f.Server + "\x00" + f.Rule + "\x00" + f.Tool + "\x00" + f.Evidence))
-	return hex.EncodeToString(h[:12])
-}
+func Key(f audit.Finding) string { return audit.Fingerprint(f) }
 
 // LoadState reads the state file; a missing file is an empty state.
 func LoadState(path string) (State, error) {

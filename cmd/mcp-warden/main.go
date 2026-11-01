@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/ELOATS/mcp-warden/internal/config"
 	"github.com/ELOATS/mcp-warden/internal/lockfile"
 	"github.com/ELOATS/mcp-warden/internal/notify"
+	"github.com/ELOATS/mcp-warden/internal/policy"
 	"github.com/ELOATS/mcp-warden/internal/probe"
 	"github.com/ELOATS/mcp-warden/internal/report"
 )
@@ -50,6 +52,8 @@ Usage:
   mcp-warden pin    [flags]   record a trusted baseline (lockfile)
   mcp-warden diff   [flags]   report anything that changed since the baseline
   mcp-warden watch  [flags]   re-run diff periodically and alert on new changes
+  mcp-warden policy init      write a team policy that allows exactly what is configured now
+  mcp-warden rules            list every rule with its description
   mcp-warden version
 
 Common flags:
@@ -58,7 +62,10 @@ Common flags:
   --config FILE       extra config file to read (repeatable)
   --probe             start/connect to each enabled server and list its tools
   --timeout DUR       per-server probe timeout (default 20s)
-  --json              machine-readable output
+  --format FMT        text (default), json or sarif (GitHub code scanning)
+  --json              shorthand for --format json
+  --policy FILE       team policy (default: ./mcp-warden.policy.json, then ~/.mcp-warden/policy.json)
+  --no-policy         ignore any policy file
   --fail-on SEV       exit 1 if a finding is at or above SEV: info|low|medium|high|critical|none
   --show SEV          lowest severity printed in text output (default low)
   --lock FILE         lockfile path for pin/diff/watch
@@ -93,6 +100,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdDiff(args[1:], stdout, stderr)
 	case "watch":
 		return cmdWatch(args[1:], stdout, stderr)
+	case "policy":
+		return cmdPolicy(args[1:], stdout, stderr)
+	case "rules":
+		return cmdRules(args[1:], stdout, stderr)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "mcp-warden "+version)
 		return 0
@@ -120,6 +131,9 @@ type opts struct {
 	failOn      string
 	show        string
 	lock        string
+	format      string
+	policyPath  string
+	noPolicy    bool
 
 	probeSet bool
 }
@@ -139,6 +153,9 @@ func newFlags(name string, stderr io.Writer, defaultFailOn string) (*flag.FlagSe
 	fs.StringVar(&o.failOn, "fail-on", defaultFailOn, "")
 	fs.StringVar(&o.show, "show", "low", "")
 	fs.StringVar(&o.lock, "lock", "", "")
+	fs.StringVar(&o.format, "format", "text", "")
+	fs.StringVar(&o.policyPath, "policy", "", "")
+	fs.BoolVar(&o.noPolicy, "no-policy", false, "")
 	return fs, o
 }
 
@@ -154,7 +171,31 @@ func parse(fs *flag.FlagSet, o *opts, args []string) error {
 			o.probeSet = true
 		}
 	})
+	if o.json {
+		o.format = "json"
+	}
+	switch o.format {
+	case "text", "json", "sarif":
+	default:
+		return fmt.Errorf("--format must be text, json or sarif, got %q", o.format)
+	}
+	o.json = o.format == "json"
 	return nil
+}
+
+// loadPolicy returns the policy in effect, or nil if there is none.
+func (o *opts) loadPolicy(env config.Env) (*policy.Policy, error) {
+	if o.noPolicy {
+		return nil, nil
+	}
+	path := o.policyPath
+	if path == "" {
+		path = policy.Find(env.ProjectDir, env.Home)
+		if path == "" {
+			return nil, nil
+		}
+	}
+	return policy.Load(path)
 }
 
 func (o *opts) discover() (config.Env, config.Result, error) {
@@ -240,6 +281,7 @@ func probeAll(servers []config.Server, env config.Env, timeout time.Duration, st
 func cmdList(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("list", stderr, "none")
 	if err := parse(fs, o, args); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
 	_, res, err := o.discover()
@@ -286,7 +328,7 @@ func (o *opts) analyze(stderr io.Writer, doProbe bool) (analysis, error) {
 	return a, nil
 }
 
-func (a analysis) report() report.Report {
+func (a analysis) report(pol *policy.Policy) report.Report {
 	var views []report.ServerView
 	var findings []audit.Finding
 	var withTools []audit.ServerTools
@@ -315,7 +357,83 @@ func (a analysis) report() report.Report {
 		views = append(views, v)
 	}
 	findings = append(findings, audit.CrossChecks(withTools)...)
-	return report.New("mcp-warden "+version, a.res.Files, a.res.Warnings, views, findings)
+	warnings := a.res.Warnings
+	suppressed := 0
+	if pol != nil {
+		findings = append(findings, pol.Check(a.res.Servers)...)
+		r := pol.Apply(findings, time.Now())
+		findings, suppressed = r.Findings, len(r.Suppressed)
+		warnings = append(warnings, r.Warnings...)
+	}
+	rep := report.New("mcp-warden "+version, a.res.Files, warnings, views, findings)
+	if pol != nil {
+		rep.Policy, rep.Suppressed = pol.Path, suppressed
+	}
+	return rep
+}
+
+// locator maps finding Server IDs to config-file locations for SARIF.
+func (a analysis) locator() (func(string) (report.Location, bool), report.Location) {
+	byID := map[string]report.Location{}
+	byClient := map[string]report.Location{}
+	fallback := report.Location{URI: ".mcp.json", Line: 1}
+	for i, s := range a.res.Servers {
+		loc := report.Location{URI: sarifURI(s), Line: findLine(s.Source, s.Name)}
+		byID[s.ID()] = loc
+		if _, ok := byClient["client:"+s.Client]; !ok {
+			byClient["client:"+s.Client] = loc
+		}
+		if i == 0 {
+			fallback = report.Location{URI: loc.URI, Line: 1}
+		}
+	}
+	return func(id string) (report.Location, bool) {
+		if l, ok := byID[id]; ok {
+			return l, true
+		}
+		if l, ok := byClient[id]; ok {
+			return l, true
+		}
+		// A server that no longer exists (diff): use the location in its ID.
+		if i := strings.Index(id, " @ "); i >= 0 {
+			loc := id[i+3:]
+			if j := strings.Index(loc, "#"); j >= 0 {
+				loc = loc[:j]
+			}
+			if !strings.HasPrefix(loc, "~") && !filepath.IsAbs(loc) {
+				return report.Location{URI: loc, Line: 1}, true
+			}
+		}
+		return report.Location{}, false
+	}, fallback
+}
+
+// sarifURI is project-relative for project configs (so code scanning can
+// annotate them) and a file:// URI for user-level configs.
+func sarifURI(s config.Server) string {
+	if s.Scope != "user" && !strings.HasPrefix(s.Location, "~") && !filepath.IsAbs(s.Location) {
+		return s.Location
+	}
+	p := filepath.ToSlash(s.Source)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p // Windows drive paths
+	}
+	return "file://" + p
+}
+
+// findLine returns the 1-based line where server name is defined, or 1.
+func findLine(path, name string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 1
+	}
+	re := regexp.MustCompile(`"` + regexp.QuoteMeta(name) + `"\s*:`)
+	for i, line := range strings.Split(string(b), "\n") {
+		if re.MatchString(line) {
+			return i + 1
+		}
+	}
+	return 1
 }
 
 func (a analysis) snapshots() []lockfile.Snapshot {
@@ -329,6 +447,7 @@ func (a analysis) snapshots() []lockfile.Snapshot {
 func cmdScan(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("scan", stderr, "none")
 	if err := parse(fs, o, args); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
 	threshold, failing, err := failThreshold(o.failOn)
@@ -346,10 +465,22 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	rep := a.report()
-	if o.json {
+	pol, err := o.loadPolicy(a.env)
+	if err != nil {
+		fmt.Fprintln(stderr, "error: policy:", err)
+		return 2
+	}
+	rep := a.report(pol)
+	switch o.format {
+	case "json":
 		_ = report.WriteJSON(stdout, rep)
-	} else {
+	case "sarif":
+		locate, fallback := a.locator()
+		if err := report.WriteSARIF(stdout, version, rep.All(), locate, fallback); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 2
+		}
+	default:
 		report.WriteText(stdout, rep, o.styler(stdout), show)
 		if !o.probe && len(rep.Servers) > 0 {
 			fmt.Fprintln(stdout, "Tip: add --probe to inspect the tools each server actually exposes.")
@@ -364,6 +495,7 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 func cmdPin(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("pin", stderr, "none")
 	if err := parse(fs, o, args); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
 	a, err := o.analyze(stderr, o.probe)
@@ -407,34 +539,55 @@ var errNoBaseline = errors.New("no baseline")
 // computeDiff loads the baseline and compares the current state against it.
 // Tools are probed automatically when the baseline has tool fingerprints,
 // unless --probe was given explicitly.
-func (o *opts) computeDiff(probeLog io.Writer) (string, lockfile.File, []audit.Finding, error) {
+type diffResult struct {
+	path       string
+	base       lockfile.File
+	findings   []audit.Finding
+	analysis   analysis
+	policy     string
+	suppressed int
+	warnings   []string
+}
+
+func (o *opts) computeDiff(probeLog io.Writer) (diffResult, error) {
+	var d diffResult
 	env, err := config.DefaultEnv(o.project)
 	if err != nil {
-		return "", lockfile.File{}, nil, err
+		return d, err
 	}
-	path := o.lockPath(env)
-	base, err := lockfile.Load(path)
+	pol, err := o.loadPolicy(env)
+	if err != nil {
+		return d, fmt.Errorf("policy: %w", err)
+	}
+	d.path = o.lockPath(env)
+	d.base, err = lockfile.Load(d.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return path, base, nil, fmt.Errorf("%w at %s; run `mcp-warden pin --probe` first", errNoBaseline, path)
+			return d, fmt.Errorf("%w at %s; run `mcp-warden pin --probe` first", errNoBaseline, d.path)
 		}
-		return path, base, nil, err
+		return d, err
 	}
 	doProbe := o.probe
 	if !o.probeSet {
-		doProbe = base.HasProbed()
+		doProbe = d.base.HasProbed()
 	}
-	a, err := o.analyze(probeLog, doProbe)
+	d.analysis, err = o.analyze(probeLog, doProbe)
 	if err != nil {
-		return path, base, nil, err
+		return d, err
 	}
-	cur := lockfile.Build("mcp-warden "+version, a.snapshots())
-	return path, base, lockfile.Diff(base, cur), nil
+	cur := lockfile.Build("mcp-warden "+version, d.analysis.snapshots())
+	d.findings = lockfile.Diff(d.base, cur)
+	if pol != nil {
+		r := pol.Apply(d.findings, time.Now())
+		d.findings, d.suppressed, d.warnings, d.policy = r.Findings, len(r.Suppressed), r.Warnings, pol.Path
+	}
+	return d, nil
 }
 
 func cmdDiff(args []string, stdout, stderr io.Writer) int {
 	flags, o := newFlags("diff", stderr, "medium")
 	if err := parse(flags, o, args); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
 	threshold, failing, err := failThreshold(o.failOn)
@@ -442,16 +595,33 @@ func cmdDiff(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	path, base, findings, err := o.computeDiff(stderr)
+	d, err := o.computeDiff(stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	if o.json {
-		_ = report.WriteJSON(stdout, map[string]any{
-			"lockfile": path, "pinnedAt": base.GeneratedAt, "findings": nonNil(findings), "summary": audit.Summary(findings)})
-	} else {
-		report.WriteDiffText(stdout, "mcp-warden "+version, path, findings, o.styler(stdout))
+	findings := d.findings
+	for _, w := range d.warnings {
+		fmt.Fprintln(stderr, "warning:", w)
+	}
+	switch o.format {
+	case "json":
+		out := map[string]any{"lockfile": d.path, "pinnedAt": d.base.GeneratedAt, "findings": nonNil(findings), "summary": audit.Summary(findings)}
+		if d.policy != "" {
+			out["policy"], out["suppressed"] = d.policy, d.suppressed
+		}
+		_ = report.WriteJSON(stdout, out)
+	case "sarif":
+		locate, fallback := d.analysis.locator()
+		if err := report.WriteSARIF(stdout, version, findings, locate, fallback); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 2
+		}
+	default:
+		report.WriteDiffText(stdout, "mcp-warden "+version, d.path, findings, o.styler(stdout))
+		if d.suppressed > 0 {
+			fmt.Fprintf(stdout, "%d change(s) suppressed by ignore rules in %s\n", d.suppressed, d.policy)
+		}
 	}
 	if failing && audit.CountAtLeast(findings, threshold) > 0 {
 		return 1
@@ -468,6 +638,7 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 	webhookFormat := flags.String("webhook-format", notify.FormatAuto, "")
 	statePath := flags.String("state", "", "")
 	if err := parse(flags, o, args); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
 	threshold, failing, err := failThreshold(o.failOn)
@@ -513,7 +684,8 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 	// tick runs one check. It returns the number of findings at/above the
 	// threshold, and a fatal error only when watching cannot continue.
 	tick := func() (int, error) {
-		_, _, findings, err := o.computeDiff(io.Discard)
+		d, err := o.computeDiff(io.Discard)
+		findings := d.findings
 		if err != nil {
 			if errors.Is(err, errNoBaseline) {
 				return 0, err
@@ -585,6 +757,61 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
+}
+
+func cmdPolicy(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "init" {
+		fmt.Fprintln(stderr, "usage: mcp-warden policy init [--project DIR] [--project-only] [--output FILE] [--force]")
+		return 2
+	}
+	flags, o := newFlags("policy init", stderr, "none")
+	output := flags.String("output", "", "")
+	force := flags.Bool("force", false, "")
+	if err := parse(flags, o, args[1:]); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	env, res, err := o.discover()
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	path := *output
+	if path == "" {
+		path = filepath.Join(env.ProjectDir, policy.FileName)
+	}
+	p := policy.Init(res.Servers)
+	if err := p.Save(path, *force); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	n := len(p.Allow.NPM) + len(p.Allow.PyPI) + len(p.Allow.Docker) + len(p.Allow.Remote) + len(p.Allow.Command)
+	fmt.Fprintf(stdout, "Wrote %s with %d allow pattern(s) from %d configured server(s).\n", path, n, len(res.Servers))
+	fmt.Fprintln(stdout, "Review it, loosen patterns where you want (e.g. \"@your-org/*\"), and commit it.")
+	if !o.projectOnly {
+		fmt.Fprintln(stdout, "Note: includes user-level configs too; use --project-only for a repository policy.")
+	}
+	return 0
+}
+
+func cmdRules(args []string, stdout, stderr io.Writer) int {
+	flags, o := newFlags("rules", stderr, "none")
+	if err := parse(flags, o, args); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	rules := audit.Rules()
+	if o.json {
+		_ = report.WriteJSON(stdout, rules)
+		return 0
+	}
+	for _, r := range rules {
+		fmt.Fprintf(stdout, "%-24s %s\n", r.ID, r.Title)
+		if r.Help != "" {
+			fmt.Fprintf(stdout, "%-24s %s\n", "", r.Help)
+		}
+	}
+	return 0
 }
 
 func stamp() string { return time.Now().Format("2006-01-02 15:04:05") }
