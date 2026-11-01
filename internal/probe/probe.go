@@ -93,6 +93,9 @@ func Probe(ctx context.Context, s config.Server, opt Options) Result {
 			err = fmt.Errorf("timed out after %s: %w", opt.Timeout, err)
 		}
 		if st, ok := t.(*stdioTransport); ok {
+			// Wait for the process to exit first: cmd.Wait finishes copying
+			// stderr, so the tail is complete (close is idempotent).
+			st.close()
 			if tail := st.stderr.String(); tail != "" {
 				err = fmt.Errorf("%w; stderr: %s", err, tail)
 			}

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ELOATS/mcp-warden/internal/audit"
+	"github.com/ELOATS/mcp-warden/internal/config"
 	"github.com/ELOATS/mcp-warden/internal/probe"
 )
 
@@ -83,20 +86,37 @@ func WriteJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-// Styler adds optional ANSI colour.
-type Styler struct{ On bool }
+// Styler adds optional ANSI colour and word wrapping.
+type Styler struct {
+	On    bool // ANSI colour
+	Width int  // wrap text at this column; 0 disables wrapping
+}
 
 // AutoColor enables colour when w is a terminal and NO_COLOR is unset.
-func AutoColor(w io.Writer) Styler {
-	if os.Getenv("NO_COLOR") != "" {
-		return Styler{}
-	}
+func AutoColor(w io.Writer) Styler { return ForWriter(w, false) }
+
+// ForWriter picks colour and wrapping for w: both only apply to terminals,
+// so piped or redirected output stays one finding line per line (grep-able).
+func ForWriter(w io.Writer, noColor bool) Styler {
 	f, ok := w.(*os.File)
 	if !ok {
 		return Styler{}
 	}
 	fi, err := f.Stat()
-	return Styler{On: err == nil && fi.Mode()&os.ModeCharDevice != 0}
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return Styler{}
+	}
+	return Styler{On: !noColor && os.Getenv("NO_COLOR") == "", Width: terminalWidth(f)}
+}
+
+func terminalWidth(f *os.File) int {
+	if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c >= 40 {
+		return min(c, 120)
+	}
+	if c := ttyColumns(f); c >= 40 {
+		return min(c, 120)
+	}
+	return 100
 }
 
 func (s Styler) wrap(code, text string) string {
@@ -124,49 +144,98 @@ func (s Styler) Sev(sev audit.Severity) string {
 	return s.wrap("2", label)
 }
 
+// lines word-wraps text to width (0 = no wrapping), with the first line
+// starting at column first and the rest indented by indent spaces.
+func lines(text string, width, first, indent int) []string {
+	words := strings.Fields(text)
+	if width <= 0 || len(words) == 0 {
+		return []string{strings.Join(words, " ")}
+	}
+	var out []string
+	cur, col := "", first
+	for _, word := range words {
+		n := utf8.RuneCountInString(word)
+		switch {
+		case cur == "":
+			cur, col = word, col+n
+		case col+1+n > width:
+			out = append(out, cur)
+			cur, col = word, indent+n
+		default:
+			cur, col = cur+" "+word, col+1+n
+		}
+	}
+	return append(out, cur)
+}
+
+const findingIndent = 11 // "  " + 8-char severity + " "
+
+func writeBlock(w io.Writer, st Styler, prefix, label, text string, start int) {
+	if label != "" {
+		text = label + " " + text
+	}
+	ls := lines(text, st.Width, start, findingIndent)
+	for i, l := range ls {
+		if label != "" && i == 0 {
+			l = st.Dim(label) + strings.TrimPrefix(l, label)
+		}
+		if i == 0 {
+			fmt.Fprintf(w, "%s%s\n", prefix, l)
+		} else {
+			fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", findingIndent), l)
+		}
+	}
+}
+
 // WriteText renders a scan report for humans.
 func WriteText(w io.Writer, r Report, st Styler, minShown audit.Severity) {
-	fmt.Fprintf(w, "%s — %d config file(s), %d server(s)\n", st.Bold(r.Generator), len(r.Files), len(r.Servers))
+	fmt.Fprintf(w, "%s — %s, %s\n", st.Bold(r.Generator), plural(len(r.Files), "config file"), plural(len(r.Servers), "server"))
 	if r.Policy != "" {
-		fmt.Fprintf(w, "%s %s (%d finding(s) suppressed by ignore rules)\n", st.Dim("policy:"), r.Policy, r.Suppressed)
+		fmt.Fprintf(w, "%s %s (%s suppressed by ignore rules)\n", st.Dim("policy:"), r.Policy, plural(r.Suppressed, "finding"))
 	}
 	for _, warn := range r.Warnings {
-		fmt.Fprintf(w, "%s %s\n", st.Dim("warning:"), warn)
+		writeBlock(w, st, "", "warning:", warn, 0)
 	}
 	if len(r.Servers) == 0 {
-		fmt.Fprintln(w, "\nNo MCP servers found. Use --config <file> to point at a config explicitly.")
+		fmt.Fprintf(w, "\nNo MCP servers found. Looked in the user and project configs of %s.\n", strings.Join(config.ClientNames, ", "))
+		fmt.Fprintln(w, "Use --project DIR for another project, or --config FILE for a config elsewhere.")
+		return
 	}
+	hidden := 0
 	for _, s := range r.Servers {
 		fmt.Fprintln(w)
 		status := ""
 		if s.Disabled {
 			status = st.Dim(" (disabled)")
 		}
-		fmt.Fprintf(w, "● %s%s  %s\n", st.Bold(s.Name), status, st.Dim("["+s.Client+" · "+s.Location+projectSuffix(s.ID)+"]"))
+		fmt.Fprintf(w, "● %s%s  %s\n", st.Bold(s.Name), status, st.Dim(s.Client+" · "+s.Location+projectSuffix(s.ID)))
 		fmt.Fprintf(w, "  %s\n", st.Dim(s.Launch))
 		if p := s.Probe; p != nil {
 			switch p.Status {
 			case "ok":
-				info := fmt.Sprintf("%d tool(s)", len(p.Tools))
+				info := plural(len(p.Tools), "tool")
 				if p.ServerName != "" {
 					info += fmt.Sprintf(" · reports %s %s", p.ServerName, p.ServerVersion)
 				}
 				if len(s.Capabilities) > 0 {
 					info += " · capabilities: " + strings.Join(s.Capabilities, ", ")
 				}
-				fmt.Fprintf(w, "  %s\n", info)
+				writeBlock(w, st, "  ", "", info, 2)
 			default:
 				fmt.Fprintf(w, "  probe: %s\n", p.Status)
 			}
 		}
-		writeFindings(w, s.Findings, st, minShown)
+		hidden += writeFindings(w, s.Findings, st, minShown)
 	}
 	if len(r.Global) > 0 {
-		fmt.Fprintf(w, "\n%s\n", st.Bold("● cross-server"))
-		writeFindings(w, r.Global, st, minShown)
+		fmt.Fprintf(w, "\n%s\n", st.Bold("● across servers"))
+		hidden += writeFindings(w, r.Global, st, minShown)
 	}
 	fmt.Fprintln(w)
 	writeSummary(w, r.Summary, st)
+	if hidden > 0 {
+		fmt.Fprintln(w, st.Dim(fmt.Sprintf("%s below %s not shown (--show info to see all).", plural(hidden, "finding"), minShown)))
+	}
 }
 
 // WriteDiffText renders diff findings grouped by server.
@@ -193,7 +262,9 @@ func WriteDiffText(w io.Writer, generator, lockPath string, findings []audit.Fin
 	writeSummary(w, audit.Summary(findings), st)
 }
 
-func writeFindings(w io.Writer, fs []audit.Finding, st Styler, minShown audit.Severity) {
+// writeFindings prints findings at or above minShown and returns how many
+// were skipped.
+func writeFindings(w io.Writer, fs []audit.Finding, st Styler, minShown audit.Severity) int {
 	hidden := 0
 	for _, f := range fs {
 		if f.Severity < minShown {
@@ -204,25 +275,42 @@ func writeFindings(w io.Writer, fs []audit.Finding, st Styler, minShown audit.Se
 		if f.Tool != "" {
 			subject = "tool " + f.Tool + ": "
 		}
-		fmt.Fprintf(w, "  %s %-24s %s%s\n", st.Sev(f.Severity), f.Rule, subject, f.Message)
+		head := fmt.Sprintf("  %s %s  ", st.Sev(f.Severity), st.Bold(f.Rule))
+		start := findingIndent + len(f.Rule) + 2
+		ls := lines(subject+f.Message, st.Width, start, findingIndent)
+		fmt.Fprintf(w, "%s%s\n", head, ls[0])
+		for _, l := range ls[1:] {
+			fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", findingIndent), l)
+		}
 		if f.Evidence != "" {
-			fmt.Fprintf(w, "  %8s %-24s %s %s\n", "", "", st.Dim("evidence:"), f.Evidence)
+			writeBlock(w, st, strings.Repeat(" ", findingIndent), "evidence:", f.Evidence, findingIndent)
 		}
 		if f.Fix != "" {
-			fmt.Fprintf(w, "  %8s %-24s %s %s\n", "", "", st.Dim("fix:"), f.Fix)
+			writeBlock(w, st, strings.Repeat(" ", findingIndent), "fix:", f.Fix, findingIndent)
 		}
 	}
-	if hidden > 0 {
-		fmt.Fprintf(w, "  %s\n", st.Dim(fmt.Sprintf("(%d lower-severity finding(s) hidden; use --show info)", hidden)))
-	}
+	return hidden
 }
 
 func writeSummary(w io.Writer, sum map[string]int, st Styler) {
-	parts := []string{}
+	var parts []string
 	for _, sev := range []audit.Severity{audit.Critical, audit.High, audit.Medium, audit.Low, audit.Info} {
-		parts = append(parts, fmt.Sprintf("%d %s", sum[sev.String()], sev))
+		if n := sum[sev.String()]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, sev))
+		}
+	}
+	if len(parts) == 0 {
+		fmt.Fprintf(w, "%s no issues found ✓\n", st.Bold("Summary:"))
+		return
 	}
 	fmt.Fprintf(w, "%s %s\n", st.Bold("Summary:"), strings.Join(parts, ", "))
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func projectSuffix(id string) string {

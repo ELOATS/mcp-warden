@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestScanAndRugPull(t *testing.T) {
 	if code != 1 { // the literal GitHub token is HIGH
 		t.Fatalf("scan exit %d\n%s\n%s", code, out, errOut)
 	}
-	for _, want := range []string{"PLAINTEXT-SECRET", "UNPINNED-PACKAGE", "2 tool(s)", "LETHAL-TRIFECTA"} {
+	for _, want := range []string{"PLAINTEXT-SECRET", "UNPINNED-PACKAGE", "2 tools", "LETHAL-TRIFECTA"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("scan output missing %q:\n%s", want, out)
 		}
@@ -382,5 +383,58 @@ func TestScanRegistry(t *testing.T) {
 	}
 	if code, _, _ := runCLI(t, "scan", "--project", project, "--cooldown", "-1"); code != 2 {
 		t.Errorf("negative cooldown accepted: %d", code)
+	}
+}
+
+func TestHelpAndErrors(t *testing.T) {
+	code, out, _ := runCLI(t, "scan", "-h")
+	if code != 0 || !strings.Contains(out, "--registry") || strings.Contains(out, "--webhook") || !strings.Contains(out, "Examples:") {
+		t.Errorf("scan -h: %d\n%s", code, out)
+	}
+	if _, out, _ := runCLI(t, "watch", "--help"); !strings.Contains(out, "--webhook-format") || strings.Contains(out, "--registry") {
+		t.Errorf("watch --help:\n%s", out)
+	}
+	if _, out, _ := runCLI(t, "help", "diff"); !strings.HasPrefix(out, "mcp-warden diff") {
+		t.Errorf("help diff:\n%s", out)
+	}
+	code, out, errOut := runCLI(t, "scan", "--prob")
+	if code != 2 || out != "" || strings.Count(errOut, "\n") != 2 || !strings.Contains(errOut, "did you mean --probe?") {
+		t.Errorf("typo flag should be a 2-line hint: %d %q", code, errOut)
+	}
+	if _, _, errOut := runCLI(t, "sacn"); !strings.Contains(errOut, `did you mean "scan"?`) {
+		t.Errorf("typo command: %q", errOut)
+	}
+	if _, _, errOut := runCLI(t, "scan", "--regsitry"); !strings.Contains(errOut, "--registry") {
+		t.Errorf("transposed letters: %q", errOut)
+	}
+	for _, c := range commands { // every documented flag exists in the docs table
+		for _, f := range c.flags {
+			if _, ok := flagDocs[f]; !ok {
+				t.Errorf("%s: flag %s has no documentation", c.name, f)
+			}
+		}
+	}
+}
+
+func TestBuildVersion(t *testing.T) {
+	cases := []struct {
+		main     string
+		settings map[string]string
+		want     string
+	}{
+		{"v0.3.0", nil, "0.3.0"},
+		{"v0.2.1-0.20261101015411-d04663a68c04", nil, "dev (d04663a)"},
+		{"v0.2.1-0.20261101015411-d04663a68c04+dirty", nil, "dev (d04663a, modified)"},
+		{"(devel)", map[string]string{"vcs.revision": "abcdef1234567", "vcs.modified": "true"}, "dev (abcdef1, modified)"},
+		{"(devel)", nil, "dev"},
+	}
+	for _, c := range cases {
+		bi := &debug.BuildInfo{Main: debug.Module{Version: c.main}}
+		for k, v := range c.settings {
+			bi.Settings = append(bi.Settings, debug.BuildSetting{Key: k, Value: v})
+		}
+		if got := buildVersion(bi); got != c.want {
+			t.Errorf("buildVersion(%q) = %q, want %q", c.main, got, c.want)
+		}
 	}
 }

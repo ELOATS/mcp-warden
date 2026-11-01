@@ -219,9 +219,9 @@ func (c *Client) checkNPM(ctx context.Context, pkg, version string, pinned bool)
 			Fix:      "Remove the server immediately and treat the machine as possibly compromised: rotate credentials it could reach."}}
 	}
 
-	resolved, note := version, ""
+	resolved := version
 	if !pinned {
-		resolved, note = latest, " (currently resolves to latest)"
+		resolved = latest
 		if version != "" && version != "latest" {
 			if t, ok := doc.DistTags[version]; ok { // a dist-tag such as "next"
 				resolved = t
@@ -245,10 +245,7 @@ func (c *Client) checkNPM(ctx context.Context, pkg, version string, pinned bool)
 			Fix:      "New packages have no track record; review the source before trusting it."})
 	}
 	if pub, ok := doc.published(resolved); ok && now.Sub(pub) < c.Cooldown {
-		out = append(out, audit.Finding{Rule: "VERSION-TOO-NEW", Severity: audit.Medium,
-			Message:  fmt.Sprintf("version %s was published %s ago%s", resolved, age(now.Sub(pub)), note),
-			Evidence: id + " published " + pub.Format("2006-01-02 15:04"),
-			Fix:      fmt.Sprintf("Compromised releases are usually caught within days. Pin a version older than %s.", age(c.Cooldown))})
+		out = append(out, c.tooNew(id, resolved, now.Sub(pub), pub, pinned))
 	}
 	if prev, ok := previousVersion(doc, resolved); ok && doc.Versions[prev].provenance() && !ver.provenance() {
 		out = append(out, audit.Finding{Rule: "PROVENANCE-DROPPED", Severity: audit.High,
@@ -410,9 +407,9 @@ func (c *Client) checkPyPI(ctx context.Context, pkg, version string, pinned bool
 	if err != nil {
 		return unreachable("PyPI", pkg, err)
 	}
-	resolved, note := version, ""
+	resolved := version
 	if !pinned {
-		resolved, note = doc.Info.Version, " (currently resolves to latest)"
+		resolved = doc.Info.Version
 	}
 	files, ok := doc.Releases[resolved]
 	if !ok {
@@ -451,10 +448,7 @@ func (c *Client) checkPyPI(ctx context.Context, pkg, version string, pinned bool
 		}
 	}
 	if !newest.IsZero() && now.Sub(newest) < c.Cooldown {
-		out = append(out, audit.Finding{Rule: "VERSION-TOO-NEW", Severity: audit.Medium,
-			Message:  fmt.Sprintf("version %s was published %s ago%s", resolved, age(now.Sub(newest)), note),
-			Evidence: id + " published " + newest.Format("2006-01-02 15:04"),
-			Fix:      fmt.Sprintf("Compromised releases are usually caught within days. Pin a version older than %s.", age(c.Cooldown))})
+		out = append(out, c.tooNew(id, resolved, now.Sub(newest), newest, pinned))
 	}
 	if yanked {
 		ev := id
@@ -488,6 +482,22 @@ func pypiHasSource(doc pypiDoc) bool {
 		}
 	}
 	return check(doc.Info.HomePage)
+}
+
+// tooNew reports a release inside the cooldown window. For unpinned
+// packages it is low severity (UNPINNED-PACKAGE already covers the fix) and
+// tells the user which version to pin instead of the fresh one.
+func (c *Client) tooNew(id, version string, ago time.Duration, at time.Time, pinned bool) audit.Finding {
+	f := audit.Finding{Rule: "VERSION-TOO-NEW", Severity: audit.Medium,
+		Message:  fmt.Sprintf("pinned version %s was published only %s ago", version, age(ago)),
+		Evidence: id + " published " + at.Format("2006-01-02 15:04"),
+		Fix:      fmt.Sprintf("Compromised releases are usually caught within days; prefer a version older than %s.", age(c.Cooldown))}
+	if !pinned {
+		f.Severity = audit.Low
+		f.Message = fmt.Sprintf("latest release %s, which runs today, is only %s old", version, age(ago))
+		f.Fix = fmt.Sprintf("When you pin this package, choose a release older than %s.", age(c.Cooldown))
+	}
+	return f
 }
 
 // ---------------------------------------------------------------- helpers

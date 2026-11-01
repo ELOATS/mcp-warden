@@ -36,8 +36,8 @@ func init() {
 	if version != "dev" {
 		return
 	}
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-		version = strings.TrimPrefix(bi.Main.Version, "v")
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		version = buildVersion(bi)
 	}
 }
 
@@ -45,55 +45,9 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-const usageText = `mcp-warden — find risky MCP servers before they find you.
-
-Usage:
-  mcp-warden list   [flags]   list MCP servers configured for this user/project
-  mcp-warden scan   [flags]   audit configs; add --probe to inspect live tool definitions
-  mcp-warden pin    [flags]   record a trusted baseline (lockfile)
-  mcp-warden diff   [flags]   report anything that changed since the baseline
-  mcp-warden watch  [flags]   re-run diff periodically and alert on new changes
-  mcp-warden policy init      write a team policy that allows exactly what is configured now
-  mcp-warden rules            list every rule with its description
-  mcp-warden version
-
-Common flags:
-  --project DIR       project directory to scan for .mcp.json, .cursor/, .vscode/ (default ".")
-  --project-only      skip user-level configs (handy in CI)
-  --config FILE       extra config file to read (repeatable)
-  --probe             start/connect to each enabled server and list its tools
-  --timeout DUR       per-server probe timeout (default 20s)
-  --format FMT        text (default), json or sarif (GitHub code scanning)
-  --json              shorthand for --format json
-  --policy FILE       team policy (default: ./mcp-warden.policy.json, then ~/.mcp-warden/policy.json)
-  --no-policy         ignore any policy file
-  --fail-on SEV       exit 1 if a finding is at or above SEV: info|low|medium|high|critical|none
-  --show SEV          lowest severity printed in text output (default low)
-  --lock FILE         lockfile path for pin/diff/watch
-
-Scan flags:
-  --registry          also check npm/PyPI metadata (malware removals, new publishers,
-                      install scripts, very new versions, yanked/deprecated, …)
-  --cooldown DAYS     versions younger than this are flagged (default 7)
-  --npm-registry URL  npm registry or mirror (or MCP_WARDEN_NPM_REGISTRY)
-  --pypi-url URL      PyPI base URL (or MCP_WARDEN_PYPI_URL)
-
-Watch flags:
-  --interval DUR      time between checks (default 1h, minimum 1m)
-  --once              run a single check and exit (for cron, launchd, systemd)
-  --notify MODE       desktop (default) or none
-  --webhook URL       also post alerts here (or set MCP_WARDEN_WEBHOOK)
-  --webhook-format F  auto|slack|discord|feishu|dingtalk|wecom|json (default auto)
-  --state FILE        where already-alerted changes are remembered
-  --fail-on SEV       minimum severity that triggers an alert (default medium)
-
-Exit codes: 0 ok, 1 findings at/above --fail-on, 2 usage or runtime error.
-Probing runs each server's command exactly as your MCP client would; only probe configs you would launch anyway.
-`
-
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, usageText)
+		fmt.Fprint(stderr, overview())
 		return 2
 	}
 	probe.ClientVersion = version
@@ -116,10 +70,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "mcp-warden "+version)
 		return 0
 	case "help", "--help", "-h":
-		fmt.Fprint(stdout, usageText)
+		if len(args) > 1 {
+			fmt.Fprint(stdout, commandHelp(args[1]))
+		} else {
+			fmt.Fprint(stdout, overview())
+		}
 		return 0
 	}
-	fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usageText)
+	msg := fmt.Sprintf("error: unknown command %q", args[0])
+	if s := suggestCommand(args[0]); s != "" {
+		msg += fmt.Sprintf(" (did you mean %q?)", s)
+	}
+	fmt.Fprintln(stderr, msg+"\nRun 'mcp-warden help' for the list of commands.")
 	return 2
 }
 
@@ -149,8 +111,6 @@ type opts struct {
 func newFlags(name string, stderr io.Writer, defaultFailOn string) (*flag.FlagSet, *opts) {
 	o := &opts{}
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() { fmt.Fprint(stderr, usageText) }
 	fs.StringVar(&o.project, "project", ".", "")
 	fs.BoolVar(&o.projectOnly, "project-only", false, "")
 	fs.Var(&o.configs, "config", "")
@@ -215,12 +175,7 @@ func (o *opts) discover() (config.Env, config.Result, error) {
 	return env, config.Discover(env, o.configs), nil
 }
 
-func (o *opts) styler(w io.Writer) report.Styler {
-	if o.noColor {
-		return report.Styler{}
-	}
-	return report.AutoColor(w)
-}
+func (o *opts) styler(w io.Writer) report.Styler { return report.ForWriter(w, o.noColor) }
 
 func (o *opts) lockPath(env config.Env) string {
 	if o.lock != "" {
@@ -288,9 +243,8 @@ func probeAll(servers []config.Server, env config.Env, timeout time.Duration, st
 
 func cmdList(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("list", stderr, "none")
-	if err := parse(fs, o, args); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+	if code, ok := parseArgs(fs, o, args, stdout, stderr); !ok {
+		return code
 	}
 	_, res, err := o.discover()
 	if err != nil {
@@ -484,9 +438,8 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 	npmURL := fs.String("npm-registry", envOr("MCP_WARDEN_NPM_REGISTRY", registry.DefaultNPM), "")
 	pypiURL := fs.String("pypi-url", envOr("MCP_WARDEN_PYPI_URL", registry.DefaultPyPI), "")
 	cooldown := fs.Int("cooldown", 7, "")
-	if err := parse(fs, o, args); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+	if code, ok := parseArgs(fs, o, args, stdout, stderr); !ok {
+		return code
 	}
 	threshold, failing, err := failThreshold(o.failOn)
 	if err != nil {
@@ -552,9 +505,8 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 
 func cmdPin(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("pin", stderr, "none")
-	if err := parse(fs, o, args); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+	if code, ok := parseArgs(fs, o, args, stdout, stderr); !ok {
+		return code
 	}
 	a, err := o.analyze(stderr, o.probe)
 	if err != nil {
@@ -644,9 +596,8 @@ func (o *opts) computeDiff(probeLog io.Writer) (diffResult, error) {
 
 func cmdDiff(args []string, stdout, stderr io.Writer) int {
 	flags, o := newFlags("diff", stderr, "medium")
-	if err := parse(flags, o, args); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+	if code, ok := parseArgs(flags, o, args, stdout, stderr); !ok {
+		return code
 	}
 	threshold, failing, err := failThreshold(o.failOn)
 	if err != nil {
@@ -695,9 +646,8 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 	webhook := flags.String("webhook", os.Getenv("MCP_WARDEN_WEBHOOK"), "")
 	webhookFormat := flags.String("webhook-format", notify.FormatAuto, "")
 	statePath := flags.String("state", "", "")
-	if err := parse(flags, o, args); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+	if code, ok := parseArgs(flags, o, args, stdout, stderr); !ok {
+		return code
 	}
 	threshold, failing, err := failThreshold(o.failOn)
 	if err != nil {
@@ -819,15 +769,14 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 
 func cmdPolicy(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "init" {
-		fmt.Fprintln(stderr, "usage: mcp-warden policy init [--project DIR] [--project-only] [--output FILE] [--force]")
+		fmt.Fprint(stderr, commandHelp("policy"))
 		return 2
 	}
 	flags, o := newFlags("policy init", stderr, "none")
 	output := flags.String("output", "", "")
 	force := flags.Bool("force", false, "")
-	if err := parse(flags, o, args[1:]); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+	if code, ok := parseArgs(flags, o, args[1:], stdout, stderr); !ok {
+		return code
 	}
 	env, res, err := o.discover()
 	if err != nil {
@@ -854,9 +803,8 @@ func cmdPolicy(args []string, stdout, stderr io.Writer) int {
 
 func cmdRules(args []string, stdout, stderr io.Writer) int {
 	flags, o := newFlags("rules", stderr, "none")
-	if err := parse(flags, o, args); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+	if code, ok := parseArgs(flags, o, args, stdout, stderr); !ok {
+		return code
 	}
 	rules := audit.Rules()
 	if o.json {

@@ -69,18 +69,17 @@ func checkLaunch(s config.Server, opt Options, add func(Finding)) {
 		}
 		checkTyposquat(l.Package, add)
 		if !l.Pinned {
-			ver := "a floating version"
+			ver := l.Runner + " fetches the latest version"
 			if l.Version != "" {
-				ver = fmt.Sprintf("version %q", l.Version)
+				ver = fmt.Sprintf("%s resolves %q", l.Runner, l.Version)
 			}
 			example := l.Package + "@<exact-version>"
 			if l.Runner == "uvx" {
 				example = l.Package + "==<exact-version>"
 			}
 			add(Finding{Rule: "UNPINNED-PACKAGE", Severity: Medium,
-				Message: fmt.Sprintf("%s runs %s of %s: every launch may silently install a new (possibly compromised) release",
-					l.Runner, ver, l.Package),
-				Fix: "Pin an exact version, e.g. " + example + "."})
+				Message: fmt.Sprintf("not pinned (%s): every launch can install a new, possibly compromised, release", ver),
+				Fix:     "Pin an exact version, e.g. " + example + "."})
 		}
 		if l.Package == "mcp-remote" {
 			for _, a := range l.Rest {

@@ -65,6 +65,9 @@ func DefaultEnv(projectDir string) (Env, error) {
 	return Env{Home: home, ConfigDir: cfg, ProjectDir: abs}, nil
 }
 
+// ClientNames are the MCP clients whose configs are discovered.
+var ClientNames = []string{"Claude Desktop", "Claude Code", "Cursor", "VS Code", "Cline", "Windsurf", "Gemini CLI"}
+
 type kind int
 
 const (

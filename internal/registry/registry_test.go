@@ -223,3 +223,16 @@ func TestUnreachable(t *testing.T) {
 		t.Errorf("network failure should be a single info finding: %v", got)
 	}
 }
+
+func TestCooldownSeverity(t *testing.T) {
+	srv, _ := fakeRegistry(t)
+	defer srv.Close()
+	c := client(srv)
+	ctx := context.Background()
+	if got := ruleSet(c.Check(ctx, npx("fresh-mcp@0.1.0")))["VERSION-TOO-NEW"]; got != audit.Medium {
+		t.Errorf("pinned fresh version: %s, want medium", got)
+	}
+	if got := ruleSet(c.Check(ctx, uvx("mcp-server-fetch")))["VERSION-TOO-NEW"]; got != audit.Low {
+		t.Errorf("unpinned fresh latest: %s, want low (UNPINNED-PACKAGE carries the fix)", got)
+	}
+}
