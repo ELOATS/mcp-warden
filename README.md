@@ -81,43 +81,31 @@ for a mirror and `--pypi-url` for a PyPI-compatible index with the JSON API.
 
 ### Continuous monitoring (`watch`)
 
-`watch` re-runs `diff` against your baseline and alerts only on changes it has
-not reported before. A failed delivery is retried on the next check.
-
 ```sh
-mcp-warden pin --probe                                # 1. accept the current state
-mcp-warden watch --interval 30m                       # 2. desktop notifications
-mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"      #    …and/or chat
+mcp-warden watch --install                                # check hourly in the background
+mcp-warden watch --install --probe --webhook "$HOOK_URL"  # also watch tool definitions, alert in chat
+mcp-warden watch --uninstall
 ```
 
-Webhook format is detected from the URL: Slack, Discord, Feishu/Lark,
-DingTalk, WeCom, otherwise generic JSON (`--webhook-format` overrides it).
-Keep the URL in `MCP_WARDEN_WEBHOOK` rather than in shell history.
-Desktop notifications use `osascript` (macOS), `notify-send` (Linux) or
-PowerShell (Windows). After you review a change, run `pin` again to accept it.
+`--install` registers a per-user job with the system scheduler (launchd on
+macOS, a systemd user timer on Linux, Task Scheduler on Windows) that runs
+`mcp-warden watch --once` with your flags every `--interval` (default 1h).
+Relative paths are made absolute and your current `PATH` is kept so `npx`
+and `uvx` are found. The webhook URL is not written into the job definition;
+it is stored in `~/.mcp-warden/webhook` with 0600 permissions. Output goes to
+`~/.mcp-warden/watch.log`.
 
-For a scheduler, use `--once`. It runs one check, alerts, and exits 1 if open
-changes remain:
+The first run trusts the current state as the baseline, so there is nothing
+to set up beforehand; after that, only changes that were not reported before
+trigger an alert, and a failed delivery is retried on the next check. To
+accept a change, run `mcp-warden pin` (with `--probe` if you watch tools).
 
-```sh
-# cron (Linux/macOS): hourly
-17 * * * * /usr/local/bin/mcp-warden watch --once >> ~/.mcp-warden/watch.log 2>&1
-
-# systemd user timer: ~/.config/systemd/user/mcp-warden.service
-#   [Service]
-#   Type=oneshot
-#   ExecStart=%h/go/bin/mcp-warden watch --once
-# ~/.config/systemd/user/mcp-warden.timer
-#   [Timer]
-#   OnCalendar=hourly
-#   Persistent=true
-#   [Install]
-#   WantedBy=timers.target
-systemctl --user enable --now mcp-warden.timer
-```
-
-On macOS, a launchd agent with `StartInterval` 3600 running
-`mcp-warden watch --once` does the same job.
+Alerts go to the desktop (`osascript`, `notify-send` or PowerShell) and/or a
+webhook. The webhook format is detected from the URL: Slack, Discord,
+Feishu/Lark, DingTalk, WeCom, otherwise generic JSON (`--webhook-format`
+overrides it). Without `--install`, `watch` runs in the foreground, and
+`--once` runs a single check for your own scheduler (exit 1 while changes
+remain open).
 
 ### Team policy (`mcp-warden.policy.json`)
 

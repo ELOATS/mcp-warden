@@ -25,18 +25,15 @@ mcp-warden watch              # 每小时自动检查一次，有新变化就通
 ## 持续监控（watch）
 
 ```sh
-mcp-warden pin --probe                              # 先确认当前状态可信
-mcp-warden watch --interval 30m                     # 桌面通知
-mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"    # 推送到飞书 / 钉钉 / 企业微信 / Slack / Discord
+mcp-warden watch --install                                # 在后台每小时检查一次
+mcp-warden watch --install --probe --webhook "$HOOK_URL"  # 同时监控工具定义，推送到飞书 / 钉钉 / 企业微信 / Slack / Discord
+mcp-warden watch --uninstall                              # 卸载
 ```
 
-- 根据 webhook 地址自动识别格式，也可以用 `--webhook-format` 手动指定。webhook 地址里带有密钥，建议放在环境变量 `MCP_WARDEN_WEBHOOK` 里。
-- 同一个变化只提醒一次；发送失败会在下一轮重试。审核完变化后重新执行 `pin`，就算确认接受了。
-- 想交给 cron / launchd / systemd 定时调度，就用 `--once`：只检查一轮就退出，仍有未处理的变化时退出码为 1。例如 `17 * * * * mcp-warden watch --once`。
-
-默认输出是紧凑视图：同一条规则在 3 个以上服务器上出现时，合并成一行列在 *common issues* 里；没有其他问题的服务器折叠成一行；最严重的问题排在最前面。加 `--verbose`（`-v`）可以看到每条问题的证据和修复建议。
-
-> `--probe` 会像你的 MCP 客户端一样启动每个已启用的服务器（包括 `npx`/`uvx` 下载）。`scan`、`list` 和不带 `--probe` 的 `pin` 都不会执行任何东西。
+- `--install` 会注册一个当前用户的定时任务：macOS 用 launchd，Linux 用 systemd 用户定时器，Windows 用任务计划程序。每隔 `--interval`（默认 1 小时）运行一次 `mcp-warden watch --once`，带上你传的参数。
+- 相对路径会转成绝对路径，并保留当前的 `PATH`，保证能找到 `npx` / `uvx`。
+- webhook 地址**不会**写进任务配置文件，而是单独存到 `~/.mcp-warden/webhook`（权限 0600，只有你能读）。运行日志写到 `~/.mcp-warden/watch.log`。
+- 第一次运行时会自动把当前状态记为可信基线，不需要提前做任何设置。之后只有没提醒过的新变化才会通知，发送失败会在下一轮重试。审核完变化后执行 `mcp-warden pin`，就算确认接受了。
 
 ## 注册表元数据检查（默认开启）
 

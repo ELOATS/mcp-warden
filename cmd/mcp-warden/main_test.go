@@ -185,13 +185,12 @@ func TestWatchOnceAlertsOnceAndRetries(t *testing.T) {
 }
 
 func TestWatchFlagErrors(t *testing.T) {
-	project, _ := setup(t)
+	_, _ = setup(t)
 	lock := filepath.Join(t.TempDir(), "missing.json")
 	cases := [][]string{
 		{"watch", "--interval", "5s", "--lock", lock},
 		{"watch", "--notify", "carrier-pigeon", "--lock", lock},
 		{"watch", "--once", "--webhook", "https://x", "--webhook-format", "fax", "--lock", lock},
-		{"watch", "--once", "--project", project, "--lock", lock}, // no baseline yet
 	}
 	for _, c := range cases {
 		if code, _, _ := runCLI(t, c...); code != 2 {
@@ -473,5 +472,20 @@ func TestRegistryOnByDefault(t *testing.T) {
 	code, out, _ := runCLI(t, "scan", "--project", project, "--project-only")
 	if code != 0 || strings.Count(out, "could not reach 127.0.0.1:1") != 1 {
 		t.Errorf("unreachable registry: %d\n%s", code, out)
+	}
+}
+
+func TestWatchCreatesBaselineOnFirstRun(t *testing.T) {
+	project, _ := setup(t)
+	lock := filepath.Join(t.TempDir(), "lock.json")
+	code, out, errOut := runCLI(t, "watch", "--once", "--project", project, "--project-only", "--lock", lock, "--notify", "none")
+	if code != 0 || !strings.Contains(out, "no baseline yet: trusted the current 2 servers") {
+		t.Fatalf("first run: %d\n%s%s", code, out, errOut)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("baseline not written: %v", err)
+	}
+	if _, out, _ := runCLI(t, "watch", "--once", "--project", project, "--project-only", "--lock", lock, "--notify", "none"); strings.Contains(out, "no baseline yet") {
+		t.Errorf("second run re-pinned:\n%s", out)
 	}
 }

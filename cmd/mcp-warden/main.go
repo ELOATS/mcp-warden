@@ -657,8 +657,31 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 	webhook := flags.String("webhook", os.Getenv("MCP_WARDEN_WEBHOOK"), "")
 	webhookFormat := flags.String("webhook-format", notify.FormatAuto, "")
 	statePath := flags.String("state", "", "")
+	install := flags.Bool("install", false, "")
+	uninstall := flags.Bool("uninstall", false, "")
 	if code, ok := parseArgs(flags, o, args, stdout, stderr); !ok {
 		return code
+	}
+	env, err := config.DefaultEnv(o.project)
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	if *uninstall {
+		in, err := newInstaller(env.Home, env.ConfigDir, stdout)
+		if err == nil {
+			err = in.uninstall()
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 2
+		}
+		return 0
+	}
+	if *webhook == "" { // stored by --install, outside the job definition
+		if b, err := os.ReadFile(webhookFile(env.Home)); err == nil {
+			*webhook = strings.TrimSpace(string(b))
+		}
 	}
 	threshold, failing, err := failThreshold(o.failOn)
 	if err != nil {
@@ -689,12 +712,25 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 		notifiers = append(notifiers, notify.Webhook{URL: *webhook, Format: *webhookFormat})
 	}
 	if *statePath == "" {
-		env, err := config.DefaultEnv(o.project)
+		*statePath = filepath.Join(filepath.Dir(o.lockPath(env)), "watch-state.json")
+	}
+	if err := o.ensureBaseline(env, stdout, stderr); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
+	if *install {
+		sched, err := scheduledArgs(args, o.project)
+		if err == nil {
+			var in installer
+			if in, err = newInstaller(env.Home, env.ConfigDir, stdout); err == nil {
+				err = in.install(sched, *interval, *webhook)
+			}
+		}
 		if err != nil {
 			fmt.Fprintln(stderr, "error:", err)
 			return 2
 		}
-		*statePath = filepath.Join(filepath.Dir(o.lockPath(env)), "watch-state.json")
+		return 0
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -844,6 +880,35 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// ensureBaseline pins the current state when no baseline exists yet, so
+// `watch` works out of the box instead of failing on its first run.
+func (o *opts) ensureBaseline(env config.Env, stdout, stderr io.Writer) error {
+	path := o.lockPath(env)
+	if _, err := os.Stat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	a, err := o.analyze(stderr, o.probe)
+	if err != nil {
+		return err
+	}
+	lf := lockfile.Build("mcp-warden "+version, a.snapshots())
+	if err := lockfile.Save(path, lf); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s no baseline yet: trusted the current %s → %s\n", stamp(), pluralize(len(lf.Servers), "server"), path)
+	if !o.probe {
+		fmt.Fprintln(stdout, "    (configs only; add --probe to also watch tool definitions for rug pulls)")
+	}
+	return nil
+}
+
+func pluralize(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func stamp() string { return time.Now().Format("2006-01-02 15:04:05") }
