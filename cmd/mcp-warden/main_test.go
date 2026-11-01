@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ func setup(t *testing.T) (project, stateFile string) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("NO_COLOR", "1")
+	t.Setenv("MCP_WARDEN_OFFLINE", "1") // never hit real registries from tests
 	project = t.TempDir()
 	stateFile = filepath.Join(t.TempDir(), "mode")
 	if err := os.WriteFile(stateFile, []byte("clean"), 0o644); err != nil {
@@ -388,10 +390,10 @@ func TestScanRegistry(t *testing.T) {
 
 func TestHelpAndErrors(t *testing.T) {
 	code, out, _ := runCLI(t, "scan", "-h")
-	if code != 0 || !strings.Contains(out, "--registry") || strings.Contains(out, "--webhook") || !strings.Contains(out, "Examples:") {
+	if code != 0 || !strings.Contains(out, "--offline") || strings.Contains(out, "--webhook") || !strings.Contains(out, "Examples:") {
 		t.Errorf("scan -h: %d\n%s", code, out)
 	}
-	if _, out, _ := runCLI(t, "watch", "--help"); !strings.Contains(out, "--webhook-format") || strings.Contains(out, "--registry") {
+	if _, out, _ := runCLI(t, "watch", "--help"); !strings.Contains(out, "--webhook-format") || strings.Contains(out, "--offline") {
 		t.Errorf("watch --help:\n%s", out)
 	}
 	if _, out, _ := runCLI(t, "help", "diff"); !strings.HasPrefix(out, "mcp-warden diff") {
@@ -436,5 +438,40 @@ func TestBuildVersion(t *testing.T) {
 		if got := buildVersion(bi); got != c.want {
 			t.Errorf("buildVersion(%q) = %q, want %q", c.main, got, c.want)
 		}
+	}
+}
+
+func TestRegistryOnByDefault(t *testing.T) {
+	project, _ := setup(t)
+	var hits int32
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.NotFound(w, r)
+	}))
+	defer reg.Close()
+	cfgPath := filepath.Join(project, ".mcp.json")
+	b, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, bytes.Replace(b, []byte(`"disabled":true`), []byte(`"disabled":false`), 1), 0o644)
+
+	t.Setenv("MCP_WARDEN_OFFLINE", "")
+	t.Setenv("MCP_WARDEN_NPM_REGISTRY", reg.URL)
+	if _, out, _ := runCLI(t, "scan", "--project", project, "--project-only"); !strings.Contains(out, "REGISTRY-NOT-FOUND") {
+		t.Fatalf("registry checks should run by default:\n%s", out)
+	}
+	n := atomic.LoadInt32(&hits)
+	if _, out, _ := runCLI(t, "scan", "--project", project, "--project-only", "--offline"); strings.Contains(out, "REGISTRY-") || atomic.LoadInt32(&hits) != n {
+		t.Errorf("--offline still queried the registry")
+	}
+	t.Setenv("MCP_WARDEN_OFFLINE", "1")
+	runCLI(t, "scan", "--project", project, "--project-only")
+	if atomic.LoadInt32(&hits) != n {
+		t.Errorf("MCP_WARDEN_OFFLINE=1 still queried the registry")
+	}
+	// Unreachable registry: one warning, scan still succeeds quickly.
+	t.Setenv("MCP_WARDEN_OFFLINE", "")
+	t.Setenv("MCP_WARDEN_NPM_REGISTRY", "http://127.0.0.1:1")
+	code, out, _ := runCLI(t, "scan", "--project", project, "--project-only")
+	if code != 0 || strings.Count(out, "could not reach 127.0.0.1:1") != 1 {
+		t.Errorf("unreachable registry: %d\n%s", code, out)
 	}
 }

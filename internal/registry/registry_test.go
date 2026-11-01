@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -214,13 +215,37 @@ func TestCachingAndScope(t *testing.T) {
 	}
 }
 
-func TestUnreachable(t *testing.T) {
+func TestUnreachableFailsFast(t *testing.T) {
+	var hits int32
+	pypi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer pypi.Close()
 	c := New("mcp-warden/test")
-	c.NPM = "http://127.0.0.1:1"
-	c.NPMDownloads = ""
-	got := ruleSet(c.Check(context.Background(), npx("anything@1.0.0")))
-	if got["REGISTRY-UNREACHABLE"] != audit.Info || len(got) != 1 {
-		t.Errorf("network failure should be a single info finding: %v", got)
+	c.NPM, c.NPMDownloads, c.PyPI = "http://127.0.0.1:1", "", pypi.URL
+	ctx := context.Background()
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		if fs := c.Check(ctx, npx(fmt.Sprintf("pkg-%d@1.0.0", i))); len(fs) != 0 {
+			t.Fatalf("offline npm should yield no per-package findings: %v", fs)
+		}
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Errorf("circuit breaker did not short-circuit: %s", time.Since(start))
+	}
+	if down := c.Unreachable(); len(down) != 1 || down["127.0.0.1:1"] == nil {
+		t.Errorf("Unreachable() = %v", down)
+	}
+	// A reachable registry answering with an error status is reported per package and not tripped.
+	for i := 0; i < 2; i++ {
+		got := ruleSet(c.Check(ctx, uvx(fmt.Sprintf("p%d==1.0", i))))
+		if got["REGISTRY-UNREACHABLE"] != audit.Info {
+			t.Errorf("HTTP 502: %v", got)
+		}
+	}
+	if atomic.LoadInt32(&hits) != 2 {
+		t.Errorf("HTTP errors must not trip the breaker: %d requests", hits)
 	}
 }
 

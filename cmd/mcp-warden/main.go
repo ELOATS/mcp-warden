@@ -434,7 +434,8 @@ func (a analysis) snapshots() []lockfile.Snapshot {
 
 func cmdScan(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("scan", stderr, "none")
-	useRegistry := fs.Bool("registry", false, "")
+	useRegistry := fs.Bool("registry", true, "")
+	offline := fs.Bool("offline", false, "")
 	npmURL := fs.String("npm-registry", envOr("MCP_WARDEN_NPM_REGISTRY", registry.DefaultNPM), "")
 	pypiURL := fs.String("pypi-url", envOr("MCP_WARDEN_PYPI_URL", registry.DefaultPyPI), "")
 	cooldown := fs.Int("cooldown", 7, "")
@@ -460,6 +461,17 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
+	// Registry lookups are read-only, so they are on by default. --offline
+	// (or MCP_WARDEN_OFFLINE=1) turns them off; an explicit --registry wins
+	// over the environment variable.
+	registrySet := false
+	fs.Visit(func(f *flag.Flag) { registrySet = registrySet || f.Name == "registry" })
+	if !registrySet && truthy(os.Getenv("MCP_WARDEN_OFFLINE")) {
+		*useRegistry = false
+	}
+	if *offline {
+		*useRegistry = false
+	}
 	if *useRegistry {
 		rc := registry.New("mcp-warden/" + version + " (+https://github.com/ELOATS/mcp-warden)")
 		rc.NPM, rc.PyPI = *npmURL, *pypiURL
@@ -468,6 +480,10 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 		}
 		rc.Cooldown = time.Duration(*cooldown) * 24 * time.Hour
 		a.checkRegistries(rc, stderr)
+		for host, err := range rc.Unreachable() {
+			a.res.Warnings = append(a.res.Warnings, fmt.Sprintf(
+				"could not reach %s (%v); its registry checks were skipped. Use --offline to skip them on purpose.", host, err))
+		}
 	}
 	pol, err := o.loadPolicy(a.env)
 	if err != nil {
@@ -486,15 +502,8 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 		}
 	default:
 		report.WriteText(stdout, rep, o.styler(stdout), show)
-		if len(rep.Servers) > 0 && (!o.probe || !*useRegistry) {
-			var tips []string
-			if !o.probe {
-				tips = append(tips, "--probe to inspect the tools each server actually exposes")
-			}
-			if !*useRegistry {
-				tips = append(tips, "--registry to check npm/PyPI metadata")
-			}
-			fmt.Fprintln(stdout, "Tip: add "+strings.Join(tips, ", and ")+".")
+		if len(rep.Servers) > 0 && !o.probe {
+			fmt.Fprintln(stdout, "Tip: add --probe to also inspect the tools each server exposes (this starts the servers).")
 		}
 	}
 	if failing && audit.CountAtLeast(rep.All(), threshold) > 0 {
@@ -818,6 +827,14 @@ func cmdRules(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func envOr(k, def string) string {

@@ -14,9 +14,9 @@ MCP 服务器以你的权限运行，工具描述会被模型当作指令来读�
 go install github.com/ELOATS/mcp-warden/cmd/mcp-warden@latest
 
 mcp-warden list               # 列出所有客户端里配置的服务器
-mcp-warden scan               # 静态审计（不执行任何东西）
+mcp-warden scan               # 审计配置，并查询 npm / PyPI 元数据（不启动任何服务器）
 mcp-warden scan --probe       # 真正启动/连接服务器，检查它暴露的工具
-mcp-warden scan --registry    # 查询 npm / PyPI 元数据，检查每个包
+mcp-warden scan --offline     # 完全不联网
 mcp-warden pin --probe        # 记录可信基线（~/.mcp-warden/lock.json）
 mcp-warden diff               # 和基线比较，有变化就以退出码 1 报警
 mcp-warden watch              # 每小时自动检查一次，有新变化就通知
@@ -36,7 +36,7 @@ mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"    # 推送到飞书 / 钉钉 /
 
 > `--probe` 会像你的 MCP 客户端一样启动每个已启用的服务器（包括 `npx`/`uvx` 下载）。`scan`、`list` 和不带 `--probe` 的 `pin` 都不会执行任何东西。
 
-## 注册表元数据检查（scan --registry）
+## 注册表元数据检查（默认开启）
 
 只读取 npm / PyPI 的元数据，不下载、不执行任何代码。可以发现：
 
@@ -46,7 +46,7 @@ mcp-warden watch --webhook "$MCP_WARDEN_WEBHOOK"    # 推送到飞书 / 钉钉 /
 - 发布不满冷却期的版本（`--cooldown 7` 天），以及创建不到 30 天的包
 - `preinstall` / `install` / `postinstall` 脚本、被撤回或弃用的版本、没有源码仓库链接、每周下载量极低
 
-没有锁定版本的包，按它当前会解析到的版本来检查。国内可以用 `--npm-registry https://registry.npmmirror.com`（或者设置环境变量 `MCP_WARDEN_NPM_REGISTRY`）。
+没有锁定版本的包，按它当前会解析到的版本来检查。连不上注册表时，第一次失败后就跳过剩余检查，只给一条提示，不会拖慢离线环境。用 `--offline` 或环境变量 `MCP_WARDEN_OFFLINE=1` 可以完全关掉联网。国内可以用 `--npm-registry https://registry.npmmirror.com`（或者设置环境变量 `MCP_WARDEN_NPM_REGISTRY`）。
 
 ## 团队策略与 GitHub 代码扫描
 

@@ -20,7 +20,8 @@ var flagDocs = map[string]flagDoc{
 	"config":         {"FILE", "extra config file to read (repeatable)"},
 	"probe":          {"", "start/connect to each enabled server and inspect its tools"},
 	"timeout":        {"DUR", "per-server probe timeout (default 20s)"},
-	"registry":       {"", "check npm/PyPI metadata: malware removals, new publishers, install scripts, fresh releases, …"},
+	"registry":       {"", "check npm/PyPI metadata (on by default; see --offline)"},
+	"offline":        {"", "skip npm/PyPI metadata lookups (env MCP_WARDEN_OFFLINE=1)"},
 	"cooldown":       {"DAYS", "flag versions younger than this (default 7)"},
 	"npm-registry":   {"URL", "npm registry or mirror, e.g. https://registry.npmmirror.com (env MCP_WARDEN_NPM_REGISTRY)"},
 	"pypi-url":       {"URL", "PyPI-compatible index with the JSON API (env MCP_WARDEN_PYPI_URL)"},
@@ -49,12 +50,13 @@ type command struct {
 }
 
 var commands = []command{
-	{name: "scan", summary: "audit MCP server configs; optionally inspect live tools and registry metadata",
-		flags: []string{"project", "project-only", "config", "probe", "timeout", "registry", "cooldown", "npm-registry", "pypi-url",
+	{name: "scan", summary: "audit MCP server configs and their npm/PyPI packages; --probe inspects live tools",
+		flags: []string{"project", "project-only", "config", "probe", "timeout", "offline", "cooldown", "npm-registry", "pypi-url",
 			"policy", "no-policy", "format", "json", "fail-on", "show", "no-color"},
 		examples: []string{
-			"mcp-warden scan                                  # static audit, runs nothing",
-			"mcp-warden scan --probe --registry               # the full check",
+			"mcp-warden scan                                  # configs + npm/PyPI metadata; starts nothing",
+			"mcp-warden scan --probe                          # also inspect live tool definitions",
+			"mcp-warden scan --offline                        # no network at all",
 			"mcp-warden scan --project-only --fail-on high    # CI gate",
 			"mcp-warden scan --format sarif > mcp.sarif       # GitHub code scanning"}},
 	{name: "list", summary: "list the MCP servers configured for this user and project",
@@ -94,7 +96,7 @@ func overview() string {
 		fmt.Fprintf(&b, "  %-13s %s\n", strings.TrimSpace(c.name+" "+c.args), c.summary)
 	}
 	b.WriteString(`
-Start with:  mcp-warden scan --probe --registry
+Start with:  mcp-warden scan          (add --probe to inspect live tools)
 Run 'mcp-warden <command> -h' for the flags of a command.
 
 Exit codes: 0 ok, 1 findings at/above --fail-on, 2 usage or runtime error.

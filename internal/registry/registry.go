@@ -44,6 +44,37 @@ type Client struct {
 
 	mu    sync.Mutex
 	cache map[string]*entry
+	down  map[string]error // registry host -> first network error (circuit breaker)
+}
+
+// Unreachable returns the network errors of registries that could not be
+// reached; their remaining checks were skipped.
+func (c *Client) Unreachable() map[string]error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]error, len(c.down))
+	for k, v := range c.down {
+		out[k] = v
+	}
+	return out
+}
+
+func (c *Client) isDown(base string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.down[hostOf(base)]
+	return ok
+}
+
+func (c *Client) markDown(base string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.down == nil {
+		c.down = map[string]error{}
+	}
+	if _, ok := c.down[hostOf(base)]; !ok {
+		c.down[hostOf(base)] = err
+	}
 }
 
 type entry struct {
@@ -54,7 +85,7 @@ type entry struct {
 // New returns a client with sensible defaults.
 func New(userAgent string) *Client {
 	return &Client{
-		HTTP: &http.Client{Timeout: 15 * time.Second}, NPM: DefaultNPM, NPMDownloads: DefaultNPMDownloads, PyPI: DefaultPyPI,
+		HTTP: &http.Client{Timeout: 8 * time.Second}, NPM: DefaultNPM, NPMDownloads: DefaultNPMDownloads, PyPI: DefaultPyPI,
 		UserAgent: userAgent, Now: time.Now,
 		Cooldown: 7 * 24 * time.Hour, NewPackageAge: 30 * 24 * time.Hour, MinDownloads: 100,
 	}
@@ -120,7 +151,7 @@ func (c *Client) getJSON(ctx context.Context, rawURL string, v any) error {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return &netError{err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -131,6 +162,28 @@ func (c *Client) getJSON(ctx context.Context, rawURL string, v any) error {
 	}
 	// Full npm documents of popular packages can be several MB.
 	return json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(v)
+}
+
+// netError marks transport-level failures (DNS, refused, timeout, proxy),
+// as opposed to an HTTP error status from a reachable registry.
+type netError struct{ err error }
+
+func (e *netError) Error() string { return e.err.Error() }
+func (e *netError) Unwrap() error { return e.err }
+
+// fetch gets a registry document, tripping the circuit breaker on network
+// failures so an offline machine fails fast instead of timing out per package.
+func (c *Client) fetch(ctx context.Context, base, rawURL string, v any) (skipped bool, err error) {
+	if c.isDown(base) {
+		return true, nil
+	}
+	err = c.getJSON(ctx, rawURL, v)
+	var ne *netError
+	if errors.As(err, &ne) {
+		c.markDown(base, ne.err)
+		return true, nil
+	}
+	return false, err
 }
 
 func hostOf(raw string) string {
@@ -197,7 +250,10 @@ func npmPath(pkg string) string {
 
 func (c *Client) checkNPM(ctx context.Context, pkg, version string, pinned bool) []audit.Finding {
 	var doc npmDoc
-	err := c.getJSON(ctx, strings.TrimRight(c.NPM, "/")+"/"+npmPath(pkg), &doc)
+	skipped, err := c.fetch(ctx, c.NPM, strings.TrimRight(c.NPM, "/")+"/"+npmPath(pkg), &doc)
+	if skipped {
+		return nil
+	}
 	if errors.Is(err, errNotFound) {
 		return []audit.Finding{{Rule: "REGISTRY-NOT-FOUND", Severity: audit.High,
 			Message:  fmt.Sprintf("npm package %s does not exist (typo, dependency confusion, or removed for malware)", pkg),
@@ -398,7 +454,10 @@ func pypiName(n string) string { return strings.ToLower(pypiNormRe.ReplaceAllStr
 
 func (c *Client) checkPyPI(ctx context.Context, pkg, version string, pinned bool) []audit.Finding {
 	var doc pypiDoc
-	err := c.getJSON(ctx, strings.TrimRight(c.PyPI, "/")+"/pypi/"+url.PathEscape(pypiName(pkg))+"/json", &doc)
+	skipped, err := c.fetch(ctx, c.PyPI, strings.TrimRight(c.PyPI, "/")+"/pypi/"+url.PathEscape(pypiName(pkg))+"/json", &doc)
+	if skipped {
+		return nil
+	}
 	if errors.Is(err, errNotFound) {
 		return []audit.Finding{{Rule: "REGISTRY-NOT-FOUND", Severity: audit.High,
 			Message:  fmt.Sprintf("PyPI project %s does not exist (typo, dependency confusion, or removed/quarantined)", pkg),
