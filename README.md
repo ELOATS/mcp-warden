@@ -43,6 +43,11 @@ mcp-warden diff                       # what changed since the baseline? (exit 1
 mcp-warden watch                      # re-check every hour, notify on new changes
 ```
 
+The default report is compact: a rule that fires on three or more servers is
+listed once under *common issues*, servers without other problems collapse
+into one line, and the worst problems come first. `--verbose` (`-v`) prints
+every finding with its evidence and fix.
+
 Useful flags: `--project DIR`, `--project-only` (skip user configs),
 `--config FILE` (repeatable), `--format text|json|sarif`, `--fail-on high`,
 `--show info`, `--policy FILE`, `--timeout 30s`, `--lock FILE`.

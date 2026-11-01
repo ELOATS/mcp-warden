@@ -436,6 +436,8 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("scan", stderr, "none")
 	useRegistry := fs.Bool("registry", true, "")
 	offline := fs.Bool("offline", false, "")
+	verbose := fs.Bool("verbose", false, "")
+	fs.BoolVar(verbose, "v", false, "")
 	npmURL := fs.String("npm-registry", envOr("MCP_WARDEN_NPM_REGISTRY", registry.DefaultNPM), "")
 	pypiURL := fs.String("pypi-url", envOr("MCP_WARDEN_PYPI_URL", registry.DefaultPyPI), "")
 	cooldown := fs.Int("cooldown", 7, "")
@@ -501,7 +503,7 @@ func cmdScan(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	default:
-		report.WriteText(stdout, rep, o.styler(stdout), show)
+		report.WriteText(stdout, rep, o.styler(stdout), report.TextOptions{MinShown: show, Verbose: *verbose})
 		if len(rep.Servers) > 0 && !o.probe {
 			fmt.Fprintln(stdout, "Tip: add --probe to also inspect the tools each server exposes (this starts the servers).")
 		}

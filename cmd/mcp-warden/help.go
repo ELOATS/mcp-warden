@@ -31,6 +31,7 @@ var flagDocs = map[string]flagDoc{
 	"json":           {"", "shorthand for --format json"},
 	"fail-on":        {"SEV", "exit 1 if a finding is at or above SEV (info|low|medium|high|critical|none)"},
 	"show":           {"SEV", "lowest severity printed in text output (default low)"},
+	"verbose":        {"", "show evidence and fixes for every finding, without grouping (also -v)"},
 	"no-color":       {"", "disable colours (also honours NO_COLOR)"},
 	"lock":           {"FILE", "baseline lockfile (default ~/.mcp-warden/lock.json, or ./mcp-warden.lock.json with --project-only)"},
 	"interval":       {"DUR", "time between checks (default 1h, minimum 1m)"},
@@ -52,7 +53,7 @@ type command struct {
 var commands = []command{
 	{name: "scan", summary: "audit MCP server configs and their npm/PyPI packages; --probe inspects live tools",
 		flags: []string{"project", "project-only", "config", "probe", "timeout", "offline", "cooldown", "npm-registry", "pypi-url",
-			"policy", "no-policy", "format", "json", "fail-on", "show", "no-color"},
+			"policy", "no-policy", "format", "json", "fail-on", "show", "verbose", "no-color"},
 		examples: []string{
 			"mcp-warden scan                                  # configs + npm/PyPI metadata; starts nothing",
 			"mcp-warden scan --probe                          # also inspect live tool definitions",

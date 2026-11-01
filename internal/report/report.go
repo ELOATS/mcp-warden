@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -187,8 +188,59 @@ func writeBlock(w io.Writer, st Styler, prefix, label, text string, start int) {
 	}
 }
 
+// TextOptions controls the human-readable scan report.
+type TextOptions struct {
+	MinShown audit.Severity // findings below this are counted but not printed
+	Verbose  bool           // print evidence and fixes, and do not group common issues
+}
+
+// group is one rule that fired on many servers, shown once in compact mode.
+type group struct {
+	rule     string
+	severity audit.Severity
+	servers  []string
+}
+
+const groupThreshold = 3
+
+// commonIssues finds server-level findings (same rule and severity) that
+// occur on groupThreshold or more servers.
+func commonIssues(r Report, min audit.Severity) ([]group, map[string]bool) {
+	type key struct {
+		rule string
+		sev  audit.Severity
+	}
+	byKey := map[key][]string{}
+	var order []key
+	for _, s := range r.Servers {
+		seen := map[key]bool{}
+		for _, f := range s.Findings {
+			k := key{f.Rule, f.Severity}
+			if f.Tool != "" || f.Severity < min || seen[k] {
+				continue
+			}
+			seen[k] = true
+			if _, ok := byKey[k]; !ok {
+				order = append(order, k)
+			}
+			byKey[k] = append(byKey[k], s.Name)
+		}
+	}
+	var groups []group
+	grouped := map[string]bool{}
+	for _, k := range order {
+		if len(byKey[k]) < groupThreshold {
+			continue
+		}
+		groups = append(groups, group{rule: k.rule, severity: k.sev, servers: byKey[k]})
+		grouped[k.rule+"\x00"+k.sev.String()] = true
+	}
+	sort.SliceStable(groups, func(i, j int) bool { return groups[i].severity > groups[j].severity })
+	return groups, grouped
+}
+
 // WriteText renders a scan report for humans.
-func WriteText(w io.Writer, r Report, st Styler, minShown audit.Severity) {
+func WriteText(w io.Writer, r Report, st Styler, opt TextOptions) {
 	fmt.Fprintf(w, "%s — %s, %s\n", st.Bold(r.Generator), plural(len(r.Files), "config file"), plural(len(r.Servers), "server"))
 	if r.Policy != "" {
 		fmt.Fprintf(w, "%s %s (%s suppressed by ignore rules)\n", st.Dim("policy:"), r.Policy, plural(r.Suppressed, "finding"))
@@ -201,40 +253,123 @@ func WriteText(w io.Writer, r Report, st Styler, minShown audit.Severity) {
 		fmt.Fprintln(w, "Use --project DIR for another project, or --config FILE for a config elsewhere.")
 		return
 	}
-	hidden := 0
+
+	var groups []group
+	grouped := map[string]bool{}
+	if !opt.Verbose {
+		groups, grouped = commonIssues(r, opt.MinShown)
+	}
+	isGrouped := func(f audit.Finding) bool {
+		return f.Tool == "" && grouped[f.Rule+"\x00"+f.Severity.String()]
+	}
+	// Blocks (the common-issues block and one per server) are printed in
+	// order of their most severe finding, so the worst problems come first.
+	type block struct {
+		sev   audit.Severity
+		print func()
+	}
+	var blocks []block
+	if len(groups) > 0 {
+		blocks = append(blocks, block{sev: groups[0].severity, print: func() {
+			fmt.Fprintf(w, "\n%s\n", st.Bold("● common issues"))
+			for _, g := range groups {
+				head := fmt.Sprintf("  %s %s  ", st.Sev(g.severity), st.Bold(g.rule))
+				text := fmt.Sprintf("%s: %s %s", audit.Rule(g.rule).Title, plural(len(g.servers), "server"), "("+strings.Join(g.servers, ", ")+")")
+				ls := lines(text, st.Width, findingIndent+len(g.rule)+2, findingIndent)
+				fmt.Fprintf(w, "%s%s\n", head, ls[0])
+				for _, l := range ls[1:] {
+					fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", findingIndent), l)
+				}
+			}
+		}})
+	}
+
+	hidden, shown := 0, 0
+	var clean []string
 	for _, s := range r.Servers {
-		fmt.Fprintln(w)
-		status := ""
-		if s.Disabled {
-			status = st.Dim(" (disabled)")
-		}
-		fmt.Fprintf(w, "● %s%s  %s\n", st.Bold(s.Name), status, st.Dim(s.Client+" · "+s.Location+projectSuffix(s.ID)))
-		fmt.Fprintf(w, "  %s\n", st.Dim(s.Launch))
-		if p := s.Probe; p != nil {
-			switch p.Status {
-			case "ok":
-				info := plural(len(p.Tools), "tool")
-				if p.ServerName != "" {
-					info += fmt.Sprintf(" · reports %s %s", p.ServerName, p.ServerVersion)
-				}
-				if len(s.Capabilities) > 0 {
-					info += " · capabilities: " + strings.Join(s.Capabilities, ", ")
-				}
-				writeBlock(w, st, "  ", "", info, 2)
-			default:
-				fmt.Fprintf(w, "  probe: %s\n", p.Status)
+		var rest []audit.Finding
+		for _, f := range s.Findings {
+			if f.Severity < opt.MinShown {
+				hidden++
+				continue
+			}
+			shown++
+			if !isGrouped(f) {
+				rest = append(rest, f)
 			}
 		}
-		hidden += writeFindings(w, s.Findings, st, minShown)
+		if len(rest) == 0 && !opt.Verbose && s.Probe == nil {
+			name := s.Name
+			if s.Disabled {
+				name += " (disabled)"
+			}
+			clean = append(clean, name)
+			continue
+		}
+		sev := audit.Severity(-1)
+		for _, f := range rest {
+			if f.Severity > sev {
+				sev = f.Severity
+			}
+		}
+		s, rest := s, rest
+		blocks = append(blocks, block{sev: sev, print: func() {
+			fmt.Fprintln(w)
+			status := ""
+			if s.Disabled {
+				status = st.Dim(" (disabled)")
+			}
+			fmt.Fprintf(w, "● %s%s  %s\n", st.Bold(s.Name), status, st.Dim(s.Client+" · "+s.Location+projectSuffix(s.ID)))
+			fmt.Fprintf(w, "  %s\n", st.Dim(s.Launch))
+			if p := s.Probe; p != nil {
+				switch p.Status {
+				case "ok":
+					info := plural(len(p.Tools), "tool")
+					if p.ServerName != "" {
+						info += fmt.Sprintf(" · reports %s %s", p.ServerName, p.ServerVersion)
+					}
+					if len(s.Capabilities) > 0 {
+						info += " · capabilities: " + strings.Join(s.Capabilities, ", ")
+					}
+					writeBlock(w, st, "  ", "", info, 2)
+				default:
+					fmt.Fprintf(w, "  probe: %s\n", p.Status)
+				}
+			}
+			writeFindings(w, rest, st, opt.MinShown, opt.Verbose)
+			if len(rest) == 0 {
+				fmt.Fprintf(w, "  %s\n", st.Dim("✓ no other issues"))
+			}
+		}})
+	}
+	sort.SliceStable(blocks, func(i, j int) bool { return blocks[i].sev > blocks[j].sev })
+	for _, b := range blocks {
+		b.print()
 	}
 	if len(r.Global) > 0 {
 		fmt.Fprintf(w, "\n%s\n", st.Bold("● across servers"))
-		hidden += writeFindings(w, r.Global, st, minShown)
+		hidden += writeFindings(w, r.Global, st, opt.MinShown, opt.Verbose)
+		for _, f := range r.Global {
+			if f.Severity >= opt.MinShown {
+				shown++
+			}
+		}
+	}
+	if len(clean) > 0 {
+		fmt.Fprintln(w)
+		label := "no issues"
+		if len(groups) > 0 {
+			label = "no other issues"
+		}
+		writeBlock(w, st, "", "", fmt.Sprintf("✓ %s with %s: %s", plural(len(clean), "server"), label, strings.Join(clean, ", ")), 0)
 	}
 	fmt.Fprintln(w)
 	writeSummary(w, r.Summary, st)
 	if hidden > 0 {
-		fmt.Fprintln(w, st.Dim(fmt.Sprintf("%s below %s not shown (--show info to see all).", plural(hidden, "finding"), minShown)))
+		fmt.Fprintln(w, st.Dim(fmt.Sprintf("%s below %s not shown (--show info to see all).", plural(hidden, "finding"), opt.MinShown)))
+	}
+	if !opt.Verbose && shown > 0 {
+		fmt.Fprintln(w, st.Dim("Run with --verbose for evidence and how to fix each finding."))
 	}
 }
 
@@ -256,7 +391,7 @@ func WriteDiffText(w io.Writer, generator, lockPath string, findings []audit.Fin
 	for _, id := range order {
 		fmt.Fprintf(w, "\n● %s\n", st.Bold(id))
 		audit.Sort(groups[id])
-		writeFindings(w, groups[id], st, audit.Info)
+		writeFindings(w, groups[id], st, audit.Info, true) // diffs always show before/after
 	}
 	fmt.Fprintln(w)
 	writeSummary(w, audit.Summary(findings), st)
@@ -264,7 +399,7 @@ func WriteDiffText(w io.Writer, generator, lockPath string, findings []audit.Fin
 
 // writeFindings prints findings at or above minShown and returns how many
 // were skipped.
-func writeFindings(w io.Writer, fs []audit.Finding, st Styler, minShown audit.Severity) int {
+func writeFindings(w io.Writer, fs []audit.Finding, st Styler, minShown audit.Severity, verbose bool) int {
 	hidden := 0
 	for _, f := range fs {
 		if f.Severity < minShown {
@@ -281,6 +416,9 @@ func writeFindings(w io.Writer, fs []audit.Finding, st Styler, minShown audit.Se
 		fmt.Fprintf(w, "%s%s\n", head, ls[0])
 		for _, l := range ls[1:] {
 			fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", findingIndent), l)
+		}
+		if !verbose {
+			continue
 		}
 		if f.Evidence != "" {
 			writeBlock(w, st, strings.Repeat(" ", findingIndent), "evidence:", f.Evidence, findingIndent)

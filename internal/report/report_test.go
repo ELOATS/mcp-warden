@@ -44,7 +44,7 @@ func TestTextLayout(t *testing.T) {
 	}
 	r := New("mcp-warden test", []string{"f"}, nil, []ServerView{{ID: "s", Name: "srv", Client: "cursor", Location: ".cursor/mcp.json"}}, fs)
 	var b bytes.Buffer
-	WriteText(&b, r, Styler{Width: 60}, audit.Low)
+	WriteText(&b, r, Styler{Width: 60}, TextOptions{MinShown: audit.Low, Verbose: true})
 	out := b.String()
 	for _, l := range strings.Split(out, "\n") {
 		if n := utf8.RuneCountInString(l); n > 60 {
@@ -61,13 +61,49 @@ func TestTextLayout(t *testing.T) {
 	}
 
 	b.Reset()
-	WriteText(&b, New("mcp-warden test", nil, nil, nil, nil), Styler{}, audit.Low)
+	WriteText(&b, New("mcp-warden test", nil, nil, nil, nil), Styler{}, TextOptions{MinShown: audit.Low})
 	if !strings.Contains(b.String(), "Claude Desktop") || strings.Contains(b.String(), "Summary") {
 		t.Errorf("empty state:\n%s", b.String())
 	}
 	b.Reset()
-	WriteText(&b, New("t", []string{"f"}, nil, []ServerView{{ID: "s", Name: "srv"}}, nil), Styler{}, audit.Low)
+	WriteText(&b, New("t", []string{"f"}, nil, []ServerView{{ID: "s", Name: "srv"}}, nil), Styler{}, TextOptions{MinShown: audit.Low})
 	if !strings.Contains(b.String(), "no issues found") {
 		t.Errorf("clean summary:\n%s", b.String())
+	}
+}
+
+func TestCompactGroupingAndOrder(t *testing.T) {
+	var views []ServerView
+	var fs []audit.Finding
+	for _, n := range []string{"a", "b", "c", "d"} {
+		views = append(views, ServerView{ID: n, Name: n})
+		fs = append(fs, audit.Finding{Rule: "UNPINNED-PACKAGE", Severity: audit.Medium, Server: n, Message: "not pinned", Fix: "pin it"})
+	}
+	fs = append(fs,
+		audit.Finding{Rule: "PLAINTEXT-SECRET", Severity: audit.High, Server: "d", Message: "literal token", Fix: "use ${VAR}"},
+		audit.Finding{Rule: "LOCAL-SCRIPT", Severity: audit.Low, Server: "b", Message: "local script"})
+	r := New("t", []string{"f"}, nil, views, fs)
+
+	var b bytes.Buffer
+	WriteText(&b, r, Styler{}, TextOptions{MinShown: audit.Low})
+	out := b.String()
+	if n := strings.Count(out, "UNPINNED-PACKAGE"); n != 1 {
+		t.Errorf("common rule should be listed once, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "4 servers (a, b, c, d)") || !strings.Contains(out, "✓ 2 servers with no other issues: a, c") {
+		t.Errorf("grouping:\n%s", out)
+	}
+	if strings.Contains(out, "fix:") || !strings.Contains(out, "--verbose") {
+		t.Errorf("compact mode should hide fixes and point to --verbose:\n%s", out)
+	}
+	iSecret, iCommon, iLocal := strings.Index(out, "● d"), strings.Index(out, "● common issues"), strings.Index(out, "● b")
+	if !(iSecret < iCommon && iCommon < iLocal) {
+		t.Errorf("blocks not ordered by severity (d=%d common=%d b=%d):\n%s", iSecret, iCommon, iLocal, out)
+	}
+
+	b.Reset()
+	WriteText(&b, r, Styler{}, TextOptions{MinShown: audit.Low, Verbose: true})
+	if n := strings.Count(b.String(), "UNPINNED-PACKAGE"); n != 4 || strings.Count(b.String(), "fix:") != 5 {
+		t.Errorf("verbose mode must list everything with fixes:\n%s", b.String())
 	}
 }
