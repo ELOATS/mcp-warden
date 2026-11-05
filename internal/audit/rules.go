@@ -91,9 +91,11 @@ func init() {
 	rule("PROVENANCE-DROPPED", "Release lacks provenance although earlier releases had it",
 		"Packages published from CI with npm trusted publishing carry provenance. A release without it is typically a manual publish with a stolen token.")
 	rule("INSTALL-SCRIPTS", "Package runs install scripts", "preinstall/install/postinstall scripts execute when npx downloads the package, before the server even starts.")
-	rule("DEPRECATED-VERSION", "Version is deprecated", "")
+	rule("DEPRECATED-VERSION", "Version is deprecated",
+		"Medium when the package is archived or unmaintained (no more security fixes); low when it merely moved, with the new name in the fix.")
 	rule("YANKED-VERSION", "Version was yanked by its maintainers", "")
-	rule("NO-SOURCE-REPO", "Package links no source repository", "Without a source link the published artifact cannot be compared with reviewed code.")
+	rule("NO-SOURCE-REPO", "Package links no source repository",
+		"Neither the repository field nor the homepage or issue tracker points at a public code host, so the published artifact cannot be compared with reviewed code.")
 	rule("LOW-DOWNLOADS", "Package is rarely downloaded", "Rarely used packages get little scrutiny; typosquats typically have almost no downloads.")
 	rule("REGISTRY-UNREACHABLE", "Registry metadata could not be fetched", "")
 	// Policy

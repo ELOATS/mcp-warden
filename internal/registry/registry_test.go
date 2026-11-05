@@ -311,3 +311,63 @@ func TestPinCandidate(t *testing.T) {
 		t.Errorf("pypi: %+v %v", got, err)
 	}
 }
+
+func TestDeprecationGrading(t *testing.T) {
+	cases := []struct {
+		msg  string
+		sev  audit.Severity
+		fix  string
+		text string
+	}{
+		// Real messages from the registry (November 2026).
+		{"Archived and unmaintained; no security guarantees. See https://github.com/modelcontextprotocol/servers-archived", audit.Medium, "maintained alternative", "no longer maintained"},
+		{"Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.", audit.Medium, "maintained alternative", "no longer maintained"},
+		{"This package has moved to @browserbasehq/mcp", audit.Low, "@browserbasehq/mcp", "moved to @browserbasehq/mcp"},
+		{"renamed to `fresh-mcp2`.", audit.Low, "fresh-mcp2", "moved to fresh-mcp2"},
+		{"use fresh-mcp2 instead", audit.Low, "", "deprecated on npm"},
+	}
+	for _, c := range cases {
+		f := deprecatedFinding("x@1", c.msg)
+		if f.Severity != c.sev || !strings.Contains(f.Fix, c.fix) || !strings.Contains(f.Message, c.text) {
+			t.Errorf("%q -> %s %q / %q", c.msg, f.Severity, f.Message, f.Fix)
+		}
+	}
+}
+
+func TestOnCodeHost(t *testing.T) {
+	yes := []string{"https://github.com/cloudflare/mcp-server-cloudflare", "https://github.com/a/b/issues",
+		"git+https://gitlab.com/a/b.git", "git@github.com:a/b.git", "https://www.github.com/a", "https://gist.github.com/x"}
+	no := []string{"", "https://modelcontextprotocol.io", "https://github.com.evil.io/a/b", "https://notgithub.com/a", "not a url"}
+	for _, u := range yes {
+		if !onCodeHost(u) {
+			t.Errorf("onCodeHost(%q) = false", u)
+		}
+	}
+	for _, u := range no {
+		if onCodeHost(u) {
+			t.Errorf("onCodeHost(%q) = true", u)
+		}
+	}
+}
+
+func TestNPMSourceFromHomepageOrBugs(t *testing.T) {
+	mk := func(extra map[string]any) npmDoc {
+		b, _ := json.Marshal(extra)
+		var d npmDoc
+		_ = json.Unmarshal(b, &d)
+		return d
+	}
+	ver := npmVersion{}
+	if !npmHasSource(mk(map[string]any{"homepage": "https://github.com/cloudflare/mcp-server-cloudflare"}), ver) {
+		t.Error("homepage on GitHub should count as a source link")
+	}
+	if !npmHasSource(mk(map[string]any{"homepage": "https://modelcontextprotocol.io", "bugs": map[string]string{"url": "https://github.com/modelcontextprotocol/servers/issues"}}), ver) {
+		t.Error("issue tracker on GitHub should count as a source link")
+	}
+	if !npmHasSource(mk(map[string]any{"bugs": "https://gitlab.com/a/b/-/issues"}), ver) {
+		t.Error("string-form bugs URL")
+	}
+	if npmHasSource(mk(map[string]any{"homepage": "https://example.com"}), ver) {
+		t.Error("a non-code-host homepage is not a source link")
+	}
+}

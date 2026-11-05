@@ -206,6 +206,8 @@ type npmDoc struct {
 	Time       map[string]json.RawMessage `json:"time"`
 	Versions   map[string]npmVersion      `json:"versions"`
 	Repository json.RawMessage            `json:"repository"`
+	Homepage   string                     `json:"homepage"`
+	Bugs       json.RawMessage            `json:"bugs"`
 }
 
 type npmVersion struct {
@@ -219,6 +221,8 @@ type npmVersion struct {
 		Attestations json.RawMessage `json:"attestations"`
 	} `json:"dist"`
 	Repository json.RawMessage `json:"repository"`
+	Homepage   string          `json:"homepage"`
+	Bugs       json.RawMessage `json:"bugs"`
 }
 
 // provenance reports whether the version was published from CI with npm
@@ -327,10 +331,9 @@ func (c *Client) checkNPM(ctx context.Context, pkg, version string, pinned bool)
 			Fix:      "Review the scripts, or run with npm_config_ignore_scripts=true if the server works without them."})
 	}
 	if msg := deprecation(ver.Deprecated); msg != "" {
-		out = append(out, audit.Finding{Rule: "DEPRECATED-VERSION", Severity: audit.Low,
-			Message: "this version is deprecated on npm", Evidence: id + ": " + clip(msg, 160)})
+		out = append(out, deprecatedFinding(id, msg))
 	}
-	if !hasRepo(doc.Repository) && !hasRepo(ver.Repository) {
+	if !npmHasSource(doc, ver) {
 		out = append(out, audit.Finding{Rule: "NO-SOURCE-REPO", Severity: audit.Low,
 			Message: "package metadata links no source repository, so the published code cannot be compared with its source", Evidence: id})
 	}
@@ -524,23 +527,90 @@ func (c *Client) checkPyPI(ctx context.Context, pkg, version string, pinned bool
 	return out
 }
 
-func pypiHasSource(doc pypiDoc) bool {
-	hosts := []string{"github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht", "gitee.com"}
-	check := func(u string) bool {
-		for _, h := range hosts {
-			if strings.Contains(strings.ToLower(u), h) {
-				return true
-			}
-		}
+var codeHosts = []string{"github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht", "gitee.com"}
+
+// onCodeHost reports whether u points at a public source-code host (exact
+// host or a subdomain of one, so github.com.evil.io does not count).
+func onCodeHost(u string) bool {
+	u = strings.TrimSpace(u)
+	if u == "" {
 		return false
 	}
-	for k, v := range doc.Info.ProjectURLs {
-		lk := strings.ToLower(k)
-		if strings.Contains(lk, "source") || strings.Contains(lk, "repo") || strings.Contains(lk, "code") || check(v) {
+	if strings.HasPrefix(u, "git@") { // git@github.com:owner/repo.git
+		u = "ssh://" + strings.Replace(strings.TrimPrefix(u, "git@"), ":", "/", 1)
+	}
+	parsed, err := url.Parse(strings.TrimPrefix(u, "git+"))
+	if err != nil {
+		return false
+	}
+	host := strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
+	for _, h := range codeHosts {
+		if host == h || strings.HasSuffix(host, "."+h) {
 			return true
 		}
 	}
-	return check(doc.Info.HomePage)
+	return false
+}
+
+// bugsURL extracts the URL from npm's "bugs" field (a string or {url}).
+func bugsURL(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var o struct {
+		URL string `json:"url"`
+	}
+	_ = json.Unmarshal(raw, &o)
+	return o.URL
+}
+
+// npmHasSource accepts the repository field or, as npmjs.com itself does,
+// a homepage or issue tracker on a public code host.
+func npmHasSource(doc npmDoc, ver npmVersion) bool {
+	if hasRepo(doc.Repository) || hasRepo(ver.Repository) {
+		return true
+	}
+	for _, u := range []string{ver.Homepage, doc.Homepage, bugsURL(ver.Bugs), bugsURL(doc.Bugs)} {
+		if onCodeHost(u) {
+			return true
+		}
+	}
+	return false
+}
+
+func pypiHasSource(doc pypiDoc) bool {
+	for k, v := range doc.Info.ProjectURLs {
+		lk := strings.ToLower(k)
+		if strings.Contains(lk, "source") || strings.Contains(lk, "repo") || strings.Contains(lk, "code") || onCodeHost(v) {
+			return true
+		}
+	}
+	return onCodeHost(doc.Info.HomePage)
+}
+
+var (
+	unmaintainedRe = regexp.MustCompile(`(?i)\b(unmaintained|no longer (maintained|supported)|not maintained|archived|abandoned|end[- ]of[- ]life|no security)\b`)
+	movedRe        = regexp.MustCompile("(?i)\\b(?:moved|renamed|migrated|replaced)\\s+(?:to|by)\\s+[\"'`]?(@?[a-z0-9][\\w.\\-]*(?:/[\\w.\\-]+)?)")
+)
+
+// deprecatedFinding grades a deprecation: unmaintained packages get no
+// security fixes (medium); a package that simply moved is low, with the
+// replacement named in the fix.
+func deprecatedFinding(id, msg string) audit.Finding {
+	f := audit.Finding{Rule: "DEPRECATED-VERSION", Severity: audit.Low,
+		Message: "this version is deprecated on npm", Evidence: id + ": " + clip(msg, 160)}
+	if m := movedRe.FindStringSubmatch(msg); m != nil {
+		f.Message = "this package has moved to " + strings.TrimRight(m[1], ".")
+		f.Fix = "Switch the server to " + strings.TrimRight(m[1], ".") + "."
+		return f
+	}
+	if unmaintainedRe.MatchString(msg) {
+		f.Severity = audit.Medium
+		f.Message = "this package is deprecated and no longer maintained, so it gets no security fixes"
+		f.Fix = "Replace this server with a maintained alternative."
+	}
+	return f
 }
 
 // tooNew reports a release inside the cooldown window. For unpinned
