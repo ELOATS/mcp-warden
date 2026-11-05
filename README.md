@@ -18,7 +18,13 @@ check, and gives teams a CI gate.
 
 ## Install
 
-Download a prebuilt binary for Linux, macOS or Windows (amd64/arm64) from
+With Homebrew (macOS, Linux):
+
+```sh
+brew install --cask eloats/tap/mcp-warden
+```
+
+Or download a prebuilt binary for Linux, macOS or Windows (amd64/arm64) from
 [Releases](https://github.com/ELOATS/mcp-warden/releases) and verify it against
 `checksums.txt`, or build it with Go 1.22+:
 

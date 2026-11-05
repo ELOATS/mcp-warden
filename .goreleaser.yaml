@@ -45,3 +45,35 @@ changelog:
 release:
   draft: false
   prerelease: auto
+
+# Homebrew: `brew install --cask eloats/tap/mcp-warden`.
+# Published to github.com/ELOATS/homebrew-tap. Needs a repository secret
+# HOMEBREW_TAP_GITHUB_TOKEN with write access to that repo; without it the
+# cask is still generated (see dist/) but not uploaded, and the release
+# itself is unaffected.
+homebrew_casks:
+  - name: mcp-warden
+    binaries:
+      - mcp-warden
+    repository:
+      owner: ELOATS
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "") "" }}true{{ else }}false{{ end }}'
+    directory: Casks
+    homepage: https://github.com/ELOATS/mcp-warden
+    description: Find risky MCP servers before they find you
+    license: Apache-2.0
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "mcp-warden {{ .Tag }}"
+    # The macOS binaries are not notarized and Homebrew quarantines cask
+    # downloads, so Gatekeeper would block the first run without this.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/mcp-warden"]
+          end
