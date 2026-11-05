@@ -19,6 +19,13 @@ jobs:
           go-version: stable # recent Go is required for loadable macOS binaries
       - run: go vet ./...
       - run: go test -race ./...
+      - name: Check Homebrew tap token
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_GITHUB_TOKEN" ]; then
+            echo "::warning title=Homebrew cask not published::The HOMEBREW_TAP_GITHUB_TOKEN secret is not set, so ELOATS/homebrew-tap will not be updated for this release."
+          fi
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
